@@ -4,6 +4,7 @@ import com.baedal.support.dto.SupportResponse;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.regex.Pattern;
 
 @Component
@@ -20,6 +21,19 @@ public class SupportResponseValidator {
             "환불 처리",
             "보상해 드리",
             "보상을 제공"
+    );
+    private static final List<Pattern> FORBIDDEN_PROMISE_PATTERNS = FORBIDDEN_PROMISES.stream()
+            .map(SupportResponseValidator::normalize)
+            .map(Pattern::quote)
+            .map(Pattern::compile)
+            .toList();
+    private static final List<String> COMPETITOR_KEYWORDS = List.of(
+            "쿠팡이츠",
+            "요기요",
+            "배달의민족",
+            "배민",
+            "coupang eats",
+            "yogiyo"
     );
 
     private static final Pattern PHONE_NUMBER = Pattern.compile("\\b01[016789][- .]?\\d{3,4}[- .]?\\d{4}\\b");
@@ -41,6 +55,10 @@ public class SupportResponseValidator {
             return fallback("쿠폰, 환불, 보상 확정 표현이 감지되어 상담원 확인이 필요합니다.");
         }
 
+        if (containsCompetitorKeyword(content)) {
+            return fallback("타 배달앱 비교 또는 추천 표현이 감지되어 상담원 확인이 필요합니다.");
+        }
+
         if (containsPersonalInformation(content)) {
             return fallback("개인정보로 보이는 값이 감지되어 상담원 확인이 필요합니다.");
         }
@@ -50,8 +68,14 @@ public class SupportResponseValidator {
 
     private boolean containsForbiddenPromise(String content) {
         String normalizedContent = normalize(content);
-        return FORBIDDEN_PROMISES.stream()
-                .map(this::normalize)
+        return FORBIDDEN_PROMISE_PATTERNS.stream()
+                .anyMatch(pattern -> pattern.matcher(normalizedContent).find());
+    }
+
+    private boolean containsCompetitorKeyword(String content) {
+        String normalizedContent = normalize(content);
+        return COMPETITOR_KEYWORDS.stream()
+                .map(SupportResponseValidator::normalize)
                 .anyMatch(normalizedContent::contains);
     }
 
@@ -77,7 +101,7 @@ public class SupportResponseValidator {
         return value == null ? "" : value;
     }
 
-    private String normalize(String value) {
-        return text(value).replaceAll("\\s+", "");
+    private static String normalize(String value) {
+        return value == null ? "" : value.toLowerCase(Locale.ROOT).replaceAll("\\s+", "");
     }
 }

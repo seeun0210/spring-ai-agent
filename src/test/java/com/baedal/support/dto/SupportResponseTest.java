@@ -24,6 +24,20 @@ class SupportResponseTest {
     }
 
     @Test
+    void rejectsBlankHandoffReasonWhenHandoffRequiredIsTrue() {
+        assertThatThrownBy(() -> new SupportResponse(
+                "상담원 확인이 필요합니다.",
+                SupportResponse.Category.ETC,
+                SupportResponse.Urgency.HIGH,
+                "상담원에게 문의 내용을 전달해 주세요.",
+                List.of("문의 내용"),
+                true,
+                "   "
+        )).isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("handoffRequired=true 일 때 handoffReason은 필수입니다.");
+    }
+
+    @Test
     void trimsHandoffReasonWhenHandoffRequiredIsTrue() {
         SupportResponse response = new SupportResponse(
                 "상담원 확인이 필요합니다.",
