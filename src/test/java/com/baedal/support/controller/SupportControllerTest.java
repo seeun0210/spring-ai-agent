@@ -3,6 +3,8 @@ package com.baedal.support.controller;
 import com.baedal.support.dto.SupportResponse;
 import com.baedal.support.validator.SupportResponseValidator;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
@@ -81,6 +83,54 @@ class SupportControllerTest {
     }
 
     @Test
+    void triageRejectsTooLongMessageBeforeCallingLlm() throws Exception {
+        String message = "가".repeat(1001);
+
+        mockMvc.perform(post("/api/v1/support")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"message\":\"" + message + "\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_REQUEST"));
+
+        verifyNoInteractions(supportChatClient);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "주문 상태 확인해 주세요,ORDER,NORMAL,false",
+            "배달 어디쯤에 있어요,DELIVERY,NORMAL,true",
+            "주문 취소하고 싶어요,CANCEL,HIGH,true",
+            "환불 언제 되나요,REFUND,HIGH,true",
+            "결제 실패했어요,PAYMENT,NORMAL,true"
+    })
+    void triageReturnsAlternativeCategories(
+            String message,
+            SupportResponse.Category category,
+            SupportResponse.Urgency urgency,
+            boolean handoffRequired
+    ) throws Exception {
+        SupportResponse response = new SupportResponse(
+                "요청을 확인했습니다.",
+                category,
+                urgency,
+                "주문번호가 있으면 함께 알려주세요.",
+                List.of("주문번호"),
+                handoffRequired,
+                handoffRequired ? "시스템 확인이 필요합니다." : null
+        );
+
+        mockChatClientResponse(message, response);
+
+        mockMvc.perform(post("/api/v1/support")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"message\":\"" + message + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.category").value(category.name()))
+                .andExpect(jsonPath("$.urgency").value(urgency.name()))
+                .andExpect(jsonPath("$.handoffRequired").value(handoffRequired));
+    }
+
+    @Test
     void triageForcesHandoffWhenCouponPromiseIsReturned() throws Exception {
         SupportResponse response = new SupportResponse(
                 "쿠폰을 제공해 드리겠습니다.",
@@ -107,6 +157,17 @@ class SupportControllerTest {
     @Test
     void triageReturnsInternalErrorWhenChatClientFails() throws Exception {
         when(supportChatClient.prompt()).thenThrow(new RuntimeException("LLM connection failed"));
+
+        mockMvc.perform(post("/api/v1/support")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"message\":\"배달 상태 확인\"}"))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.code").value("INTERNAL_ERROR"));
+    }
+
+    @Test
+    void triageReturnsInternalErrorWhenChatClientTimesOut() throws Exception {
+        when(supportChatClient.prompt()).thenThrow(new RuntimeException("LLM timeout"));
 
         mockMvc.perform(post("/api/v1/support")
                         .contentType(MediaType.APPLICATION_JSON)
