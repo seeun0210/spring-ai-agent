@@ -424,12 +424,6 @@
 summary, category, urgency, nextAction, neededInfo, handoffRequired, handoffReason 필드를 포함합니다.</textarea>
             </label>
 
-            <div class="row">
-              <label>
-                반복 횟수
-                <input id="repeat" type="number" min="1" max="10" value="1" />
-              </label>
-            </div>
           </div>
 
           <div class="actions">
@@ -504,7 +498,6 @@ summary, category, urgency, nextAction, neededInfo, handoffRequired, handoffReas
     const labControls = document.getElementById("labControls");
     const messageInput = document.getElementById("message");
     const systemPromptInput = document.getElementById("systemPrompt");
-    const repeatInput = document.getElementById("repeat");
     const runBtn = document.getElementById("runBtn");
     const resetBtn = document.getElementById("resetBtn");
     const statusEl = document.getElementById("status");
@@ -578,11 +571,9 @@ summary, category, urgency, nextAction, neededInfo, handoffRequired, handoffReas
     }
 
     async function runLab(message) {
-      const repeat = Number(repeatInput.value || 1);
       const payload = {
         systemPrompt: systemPromptInput.value,
-        message,
-        repeat
+        message
       };
       const data = await postJson(endpoints.lab, payload);
       renderLab(data);
@@ -672,19 +663,7 @@ summary, category, urgency, nextAction, neededInfo, handoffRequired, handoffReas
     }
 
     function renderLab(data) {
-      const consistency = typeof data.categoryConsistency === "number"
-        ? `${Math.round(data.categoryConsistency * 100)}%`
-        : "-";
-
-      summary.textContent = `총 ${data.totalRuns}회 실행, categoryConsistency ${consistency}`;
-      fields.innerHTML = [
-        field("categoryCounts", stringifyCounts(data.categoryCounts)),
-        field("urgencyCounts", stringifyCounts(data.urgencyCounts)),
-        field("categoryConsistency", consistency),
-        field("totalRuns", data.totalRuns)
-      ].join("");
-      raw.textContent = JSON.stringify(data, null, 2);
-      setDone("Prompt Lab");
+      renderSupport(data, "Prompt Lab");
     }
 
     function renderStream(text) {
@@ -731,16 +710,6 @@ summary, category, urgency, nextAction, neededInfo, handoffRequired, handoffReas
           <dd>${escapeHtml(value == null || value === "" ? "-" : String(value))}</dd>
         </div>
       `;
-    }
-
-    function stringifyCounts(counts) {
-      if (!counts || Object.keys(counts).length === 0) {
-        return "-";
-      }
-
-      return Object.entries(counts)
-        .map(([key, value]) => `${key}: ${value}`)
-        .join(", ");
     }
 
     function setStatus(text) {

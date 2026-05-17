@@ -1,19 +1,25 @@
-package com.baedal.support;
+package com.baedal.support.controller;
 
-import lombok.RequiredArgsConstructor;
+import com.baedal.support.dto.ChatRequest;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
-@RequiredArgsConstructor
 @RequestMapping("/api/v1/chat")
 public class ChatController {
 
-    private final ChatClient.Builder chatClientBuilder;
+    private final ChatClient syncChatClient;
+
+    public ChatController(
+            @Qualifier("syncChatClient") ChatClient syncChatClient
+    ) {
+        this.syncChatClient = syncChatClient;
+    }
 
     @PostMapping
     public String chat(@RequestBody ChatRequest request) {
-        return chatClientBuilder.build()
+        return syncChatClient
                 .prompt()
                 .user(request.message())
                 .call()

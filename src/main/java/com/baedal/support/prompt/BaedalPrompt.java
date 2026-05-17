@@ -1,4 +1,4 @@
-package com.baedal.support;
+package com.baedal.support.prompt;
 
 public final class BaedalPrompt {
 
@@ -8,6 +8,7 @@ public final class BaedalPrompt {
             주문, 배달 상태, 주문 취소, 환불, 결제, 기타 문의를 분류하고 고객이 다음에 무엇을 해야 하는지 안내합니다.
 
             [규칙]
+            - 반드시 한국어로만 응답합니다.
             - 항상 존댓말을 사용합니다.
             - 고객 문의를 ORDER, DELIVERY, CANCEL, REFUND, PAYMENT, ETC 중 하나로 분류합니다.
             - 정보가 부족하면 추측하지 말고, neededInfo에 필요한 정보를 적습니다.

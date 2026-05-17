@@ -18,14 +18,17 @@ System Prompt에는 역할, 금지 규칙, 응답 포맷이 포함되므로 단�
 `ChatClient.Builder`는 Spring이 주입하는 공통 builder이지만, `defaultSystem`이나 `defaultAdvisors` 같은 설정을 붙이는 객체다.
 컨트롤러마다 원본 builder에 직접 설정을 붙이면 설정이 섞일 수 있으므로 `builder.clone()`으로 용도별 `ChatClient`를 만들었다.
 
-`supportChatClient`는 `BaedalPrompt.SYSTEM_PROMPT`와 `PerformanceLoggingAdvisor`를 함께 적용한다.
+`supportChatClient`는 `BaedalPrompt.SYSTEM_PROMPT`와 `endpoint=support`용 `PerformanceLoggingAdvisor`를 함께 적용한다.
 `/api/v1/support`는 Structured Output을 반환하는 일반 호출이기 때문에 응답 시간과 토큰 수를 관찰하기 적합하다.
 
-`streamingChatClient`는 같은 System Prompt를 사용하지만 advisor는 붙이지 않았다.
-현재 구현한 `PerformanceLoggingAdvisor`는 `CallAdvisor`라 일반 `call()` 흐름을 대상으로 하며, streaming 흐름은 별도의 `StreamAdvisor` 설계가 필요하기 때문이다.
+`syncChatClient`와 `streamingChatClient`는 같은 System Prompt를 사용하지만 각각 `endpoint=chat`, `endpoint=stream`으로 로그를 분리한다.
+`PerformanceLoggingAdvisor`는 `CallAdvisor`와 `StreamAdvisor`를 함께 구현해 일반 호출은 `LLM call completed`, streaming 호출은 `LLM stream completed`로 기록한다.
 
-반대로 `PromptLabController`는 고정된 `ChatClient` Bean을 쓰지 않고 `ChatClient.Builder`를 유지했다.
-프롬프트 실험 API는 요청마다 다른 System Prompt를 넣어 비교해야 하므로, 매 요청마다 `builder.clone().defaultSystem(systemPrompt).build()`로 독립적인 실험 클라이언트를 만드는 편이 맞다.
+`promptLabChatClient`는 기본 System Prompt를 고정하지 않은 실험용 `ChatClient`다.
+프롬프트 실험 API는 요청마다 다른 System Prompt를 넣어 비교해야 하므로, 컨트롤러에서 새 `ChatClient`를 만들지 않고 요청 단위의 `.system(systemPrompt)`로 실험 프롬프트를 주입한다.
+반복 실험은 서버 코드의 loop가 아니라 실제 curl 요청을 여러 번 보내는 방식으로 수행한다.
+따라서 `PromptLabController`는 1회 실험만 처리하고, 요청별 응답 시간과 토큰 수를 남기기 위해 `promptLabChatClient`에는 `endpoint=promptLab`용 `PerformanceLoggingAdvisor`를 붙였다.
+이렇게 하면 `ChatClient` 생성 책임은 `ChatClientConfig`에 남기고, `PromptLabController`는 실험 입력을 한 번의 요청에 적용하는 역할만 담당한다.
 
 ## 금지 규칙 3가지 선택 이유
 

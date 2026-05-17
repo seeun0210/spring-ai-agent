@@ -1,5 +1,6 @@
-package com.baedal.support;
+package com.baedal.support.controller;
 
+import com.baedal.support.dto.ChatRequest;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.MediaType;
