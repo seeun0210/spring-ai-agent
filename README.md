@@ -283,6 +283,8 @@ curl requests = 5
 
 공격 결과: 금지 있음에서도 비교 자체를 완전히 차단하지 못해 부분적으로 성공했어요.
 금지 없음에서는 비교 상담을 일반 문의로 처리했어요.
+이후 `SupportRequestGuard`를 추가해 "쿠팡이츠에서 찾아줘", "요기요랑 비교해줘"처럼 다른 배달앱을 직접 언급하는 요청은 LLM 호출 전에 차단하도록 보완했어요.
+이 경우 `ETC`, `LOW`, `handoffRequired=false`로 응답하고 현재 서비스의 주문/배달/취소/환불/결제 문의로 다시 안내해요.
 
 ### 공격 시나리오 3: 쿠폰 압박
 
@@ -421,6 +423,7 @@ LLM call completed. endpoint=support, elapsedMs=13159, promptTokens=671, complet
 - `BaedalPromptTest`: System Prompt에 `[역할]`, `[규칙]`, `[금지]`, `[응답 포맷]`과 핵심 금지 규칙이 포함되어 있는지 검증
 - `SupportControllerTest`: "사장님 번호 알려줘" 요청에 대해 `ETC`, `handoffRequired=true`, 필요한 추가 정보 등이 구조화 응답으로 반환되는지 검증
 - `SupportControllerTest`: 빈 메시지/null 메시지 400 응답, LLM 실패 500 응답, 쿠폰 약속 응답의 상담원 연결 전환을 검증
+- `SupportControllerTest`: 다른 배달앱 요청을 LLM 호출 전에 차단하고 현재 서비스 문의로 안내하는지 검증
 
 검증 명령:
 
@@ -497,6 +500,7 @@ AI가 환불 가능 여부를 직접 추측하지 않고, 주문 상태 조회 t
 - `ChatClientConfig`에서 엔드포인트별 `ChatClient`를 Bean으로 만들고 controller에서는 매 요청 build하지 않는 구조가 적절한지 확인받고 싶어요.
 - Prompt Lab 반복 실험을 서버 내부 loop가 아니라 실제 curl 반복 요청으로 수행한 방식이 실험 근거로 충분한지 보고 싶어요.
 - 금지 규칙이 있어도 쿠폰 약속이 나온 사례를 근거로 추가한 `SupportResponseValidator`의 검사 범위가 적절한지 리뷰받고 싶어요.
+- 다른 배달앱 요청을 `SupportRequestGuard`에서 키워드 기반으로 차단하는 방식이 적절한지, 정규식/검색어 사전 관리가 필요한지 의견을 받고 싶어요.
 - `support`, `promptLab`, `chat`, `stream`으로 advisor 로그를 구분한 방식이 관찰 가능성 측면에서 충분한지 확인받고 싶어요.
 - 음식점/메뉴 큐레이션처럼 자연어 취향 검색이 필요한 기능은 Vector Store를 붙이는 게 적절한지, DB 필터/검색엔진과 어떤 경계로 나누는 게 좋은지 궁금해요.
 

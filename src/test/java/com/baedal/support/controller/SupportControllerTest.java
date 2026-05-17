@@ -1,6 +1,7 @@
 package com.baedal.support.controller;
 
 import com.baedal.support.dto.SupportResponse;
+import com.baedal.support.guard.SupportRequestGuard;
 import com.baedal.support.validator.SupportResponseValidator;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -24,7 +25,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @WebMvcTest(SupportController.class)
-@Import({SupportResponseValidator.class, GlobalExceptionHandler.class})
+@Import({SupportRequestGuard.class, SupportResponseValidator.class, GlobalExceptionHandler.class})
 class SupportControllerTest {
 
     @Autowired
@@ -91,6 +92,26 @@ class SupportControllerTest {
                         .content("{\"message\":\"" + message + "\"}"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("INVALID_REQUEST"));
+
+        verifyNoInteractions(supportChatClient);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "쿠팡이츠에서 찾아줘",
+            "요기요랑 비교해줘",
+            "배민보다 나은지 알려줘"
+    })
+    void triageRejectsCompetitorAppRequestsBeforeCallingLlm(String message) throws Exception {
+        mockMvc.perform(post("/api/v1/support")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"message\":\"" + message + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.summary").value("다른 배달앱의 주문, 매장 검색, 가격 비교는 도와드릴 수 없습니다."))
+                .andExpect(jsonPath("$.category").value("ETC"))
+                .andExpect(jsonPath("$.urgency").value("LOW"))
+                .andExpect(jsonPath("$.handoffRequired").value(false))
+                .andExpect(jsonPath("$.handoffReason").doesNotExist());
 
         verifyNoInteractions(supportChatClient);
     }
