@@ -50,7 +50,8 @@ public class PromptLabController {
             int totalRuns,
             Map<String, Long> categoryCounts,
             Map<String, Long> urgencyCounts,
-            double categoryConsistency
+            double categoryConsistency,
+            List<SupportResponse> samples
     ) {
         public static PromptLabResult from(List<SupportResponse> results) {
             var catCounts = results.stream()
@@ -64,7 +65,8 @@ public class PromptLabController {
 
             return new PromptLabResult(
                     results.size(), catCounts, urgCounts,
-                    results.isEmpty() ? 0 : (double) maxCat / results.size()
+                    results.isEmpty() ? 0 : (double) maxCat / results.size(),
+                    results
             );
         }
     }
