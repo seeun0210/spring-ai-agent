@@ -16,19 +16,28 @@ public class PromptLabController {
 
     private final ChatClient.Builder builder;
 
-    // TODO [2단계]: 프롬프트 정량 비교 실험 엔드포인트를 구현하라.
-    //
-    // 구현 힌트:
-    // 1. req.systemPrompt()를 System Prompt로 설정한 ChatClient를 빌드한다.
-    // 2. req.repeat() 횟수만큼 반복하여 .entity(SupportResponse.class)를 호출한다.
-    // 3. 결과 리스트를 PromptLabResult.from()에 넘겨 통계를 계산한다.
-    //
-    // 실험 후:
-    // - 단순 프롬프트 vs 구조화된 프롬프트로 각 5회 호출
-    // - categoryConsistency 수치를 비교하여 README에 기록
     @PostMapping
     public PromptLabResult experiment(@RequestBody PromptLabRequest req) {
-        throw new UnsupportedOperationException("TODO: 구현하세요");
+        String systemPrompt = req.systemPrompt() == null || req.systemPrompt().isBlank()
+                ? BaedalPrompt.SYSTEM_PROMPT
+                : req.systemPrompt();
+        int repeat = Math.max(1, Math.min(req.repeat(), 10));
+
+        ChatClient chatClient = builder.clone()
+                .defaultSystem(systemPrompt)
+                .build();
+
+        List<SupportResponse> results = new ArrayList<>();
+        for (int i = 0; i < repeat; i++) {
+            SupportResponse response = chatClient
+                    .prompt()
+                    .user(req.message())
+                    .call()
+                    .entity(SupportResponse.class);
+            results.add(response);
+        }
+
+        return PromptLabResult.from(results);
     }
 
     public record PromptLabRequest(
