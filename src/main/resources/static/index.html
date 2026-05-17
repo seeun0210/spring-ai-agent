@@ -1,0 +1,774 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Baedal Support Agent</title>
+  <style>
+    :root {
+      --bg: #f4f1eb;
+      --ink: #181614;
+      --muted: #706b63;
+      --line: #d6cec1;
+      --panel: #fffaf1;
+      --panel-strong: #171714;
+      --accent: #0d7f62;
+      --accent-2: #d45b32;
+      --accent-3: #244b8f;
+      --ok: #116a4f;
+      --warn: #a84b24;
+      --radius: 8px;
+      --shadow: 0 18px 50px rgba(24, 22, 20, 0.12);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      background:
+        linear-gradient(90deg, rgba(24, 22, 20, 0.045) 1px, transparent 1px),
+        linear-gradient(180deg, rgba(24, 22, 20, 0.035) 1px, transparent 1px),
+        var(--bg);
+      background-size: 28px 28px;
+      font-family: "Avenir Next", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+    }
+
+    button,
+    textarea,
+    input {
+      font: inherit;
+    }
+
+    .shell {
+      width: min(1180px, calc(100vw - 32px));
+      margin: 28px auto;
+    }
+
+    .topbar {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 18px;
+      align-items: end;
+      padding-bottom: 18px;
+      border-bottom: 2px solid var(--ink);
+    }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--accent-2);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(30px, 5vw, 60px);
+      line-height: 0.94;
+      letter-spacing: 0;
+    }
+
+    .status {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      min-height: 34px;
+      padding: 8px 12px;
+      color: var(--panel);
+      background: var(--panel-strong);
+      border: 1px solid var(--panel-strong);
+      border-radius: var(--radius);
+      white-space: nowrap;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      background: var(--accent);
+      border-radius: 999px;
+      box-shadow: 0 0 0 5px rgba(13, 127, 98, 0.16);
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(320px, 0.9fr) minmax(0, 1.1fr);
+      gap: 18px;
+      margin-top: 18px;
+    }
+
+    .panel {
+      background: rgba(255, 250, 241, 0.92);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .panel-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      min-height: 54px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.48);
+    }
+
+    .panel-title {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 800;
+      letter-spacing: 0;
+    }
+
+    .mode-tabs {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+      padding: 8px;
+      background: #ebe4d8;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .tab {
+      height: 40px;
+      color: var(--muted);
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 800;
+    }
+
+    .tab[aria-selected="true"] {
+      color: var(--ink);
+      background: var(--panel);
+      border-color: var(--ink);
+    }
+
+    .form {
+      display: grid;
+      gap: 14px;
+      padding: 16px;
+    }
+
+    label {
+      display: grid;
+      gap: 7px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    textarea,
+    input {
+      width: 100%;
+      color: var(--ink);
+      background: #fffdf8;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      outline: none;
+    }
+
+    textarea {
+      min-height: 126px;
+      resize: vertical;
+      padding: 12px;
+      line-height: 1.55;
+    }
+
+    textarea:focus,
+    input:focus {
+      border-color: var(--accent-3);
+      box-shadow: 0 0 0 3px rgba(36, 75, 143, 0.16);
+    }
+
+    .prompt-area {
+      min-height: 230px;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 112px;
+      gap: 10px;
+      align-items: end;
+    }
+
+    input[type="number"] {
+      height: 42px;
+      padding: 0 10px;
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      justify-content: flex-end;
+      padding-top: 2px;
+    }
+
+    .btn {
+      display: inline-flex;
+      gap: 8px;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      padding: 0 16px;
+      color: #fffaf1;
+      background: var(--ink);
+      border: 1px solid var(--ink);
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 900;
+    }
+
+    .btn.secondary {
+      color: var(--ink);
+      background: transparent;
+    }
+
+    .btn:disabled {
+      cursor: wait;
+      opacity: 0.58;
+    }
+
+    .btn-icon {
+      display: inline-grid;
+      place-items: center;
+      width: 20px;
+      height: 20px;
+      color: var(--ink);
+      background: #fffaf1;
+      border-radius: 999px;
+      font-size: 13px;
+      line-height: 1;
+    }
+
+    .btn.secondary .btn-icon {
+      color: #fffaf1;
+      background: var(--ink);
+    }
+
+    .result-shell {
+      min-height: 640px;
+    }
+
+    .result-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 26px;
+      padding: 0 9px;
+      color: var(--ink);
+      background: #f2eadc;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .pill.ok {
+      color: var(--ok);
+      border-color: rgba(17, 106, 79, 0.38);
+      background: rgba(17, 106, 79, 0.08);
+    }
+
+    .pill.warn {
+      color: var(--warn);
+      border-color: rgba(168, 75, 36, 0.36);
+      background: rgba(168, 75, 36, 0.09);
+    }
+
+    .output {
+      display: grid;
+      gap: 12px;
+      padding: 16px;
+    }
+
+    .summary {
+      padding: 16px;
+      background: var(--panel-strong);
+      color: #fffaf1;
+      border-radius: var(--radius);
+      line-height: 1.7;
+      min-height: 86px;
+      white-space: pre-wrap;
+    }
+
+    .fields {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .field {
+      min-height: 72px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.48);
+    }
+
+    .field dt {
+      margin-bottom: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 900;
+    }
+
+    .field dd {
+      margin: 0;
+      line-height: 1.5;
+      word-break: keep-all;
+      overflow-wrap: anywhere;
+    }
+
+    pre {
+      margin: 0;
+      max-height: 330px;
+      overflow: auto;
+      padding: 14px;
+      color: #f7efe2;
+      background: #121210;
+      border-radius: var(--radius);
+      line-height: 1.5;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    @media (max-width: 860px) {
+      .shell {
+        width: min(100vw - 22px, 680px);
+        margin: 16px auto;
+      }
+
+      .topbar,
+      .workspace,
+      .fields,
+      .row {
+        grid-template-columns: 1fr;
+      }
+
+      .status,
+      .actions {
+        justify-content: flex-start;
+      }
+
+      .result-shell {
+        min-height: auto;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Spring AI Prompt Lab</p>
+        <h1>Baedal Support Agent</h1>
+      </div>
+      <div class="status" id="status">
+        <span class="dot" aria-hidden="true"></span>
+        <span>대기 중</span>
+      </div>
+    </header>
+
+    <section class="workspace" aria-label="배달 상담 에이전트 테스트 화면">
+      <section class="panel" aria-label="요청 입력">
+        <nav class="mode-tabs" aria-label="테스트 모드">
+          <button class="tab" id="tab-support" type="button" aria-selected="true" data-mode="support">상담</button>
+          <button class="tab" id="tab-stream" type="button" aria-selected="false" data-mode="stream">스트림</button>
+          <button class="tab" id="tab-lab" type="button" aria-selected="false" data-mode="lab">실험</button>
+        </nav>
+
+        <div class="form">
+          <label>
+            문의 내용
+            <textarea id="message">주문 취소하고 싶은데 이미 배달 중이라고 떠요. 환불 가능한가요?</textarea>
+          </label>
+
+          <div id="labControls" class="hidden">
+            <label>
+              System Prompt
+              <textarea id="systemPrompt" class="prompt-area">[역할]
+당신은 배달 상담 AI입니다.
+
+[규칙]
+문의 내용을 ORDER, DELIVERY, CANCEL, REFUND, PAYMENT, ETC 중 하나로 분류합니다.
+정보가 부족하면 neededInfo에 필요한 정보를 적습니다.
+
+[금지]
+개인정보를 노출하지 않습니다.
+환불, 보상, 쿠폰 지급을 확정하지 않습니다.
+
+[응답 포맷]
+summary, category, urgency, nextAction, neededInfo, handoffRequired, handoffReason 필드를 포함합니다.</textarea>
+            </label>
+
+            <div class="row">
+              <label>
+                반복 횟수
+                <input id="repeat" type="number" min="1" max="10" value="1" />
+              </label>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button class="btn secondary" id="resetBtn" type="button">
+              <span class="btn-icon" aria-hidden="true">↺</span>
+              초기화
+            </button>
+            <button class="btn" id="runBtn" type="button">
+              <span class="btn-icon" aria-hidden="true">▶</span>
+              실행
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel result-shell" aria-label="응답 결과">
+        <div class="panel-header">
+          <h2 class="panel-title" id="resultTitle">상담 결과</h2>
+          <div class="result-meta" id="meta">
+            <span class="pill">미실행</span>
+          </div>
+        </div>
+
+        <div class="output">
+          <div class="summary" id="summary">실행하면 응답이 여기에 표시됩니다.</div>
+
+          <dl class="fields" id="fields">
+            <div class="field">
+              <dt>category</dt>
+              <dd>-</dd>
+            </div>
+            <div class="field">
+              <dt>urgency</dt>
+              <dd>-</dd>
+            </div>
+            <div class="field">
+              <dt>nextAction</dt>
+              <dd>-</dd>
+            </div>
+            <div class="field">
+              <dt>neededInfo</dt>
+              <dd>-</dd>
+            </div>
+          </dl>
+
+          <pre id="raw">{}</pre>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      mode: "support",
+      busy: false,
+      startedAt: 0
+    };
+
+    const samples = {
+      support: "주문 취소하고 싶은데 이미 배달 중이라고 떠요. 환불 가능한가요?",
+      stream: "주문번호 2024-1234 배달 어디쯤에 있어요?",
+      lab: "배달이 1시간 넘게 안 오고 있는데 환불 받을 수 있나요?"
+    };
+
+    const endpoints = {
+      support: "/api/v1/support",
+      stream: "/api/v1/chat/stream",
+      lab: "/api/v1/prompt-lab"
+    };
+
+    const tabs = document.querySelectorAll(".tab");
+    const labControls = document.getElementById("labControls");
+    const messageInput = document.getElementById("message");
+    const systemPromptInput = document.getElementById("systemPrompt");
+    const repeatInput = document.getElementById("repeat");
+    const runBtn = document.getElementById("runBtn");
+    const resetBtn = document.getElementById("resetBtn");
+    const statusEl = document.getElementById("status");
+    const resultTitle = document.getElementById("resultTitle");
+    const meta = document.getElementById("meta");
+    const summary = document.getElementById("summary");
+    const fields = document.getElementById("fields");
+    const raw = document.getElementById("raw");
+
+    tabs.forEach((tab) => {
+      tab.addEventListener("click", () => setMode(tab.dataset.mode));
+    });
+
+    runBtn.addEventListener("click", run);
+    resetBtn.addEventListener("click", reset);
+
+    function setMode(mode) {
+      state.mode = mode;
+      tabs.forEach((tab) => {
+        tab.setAttribute("aria-selected", String(tab.dataset.mode === mode));
+      });
+      labControls.classList.toggle("hidden", mode !== "lab");
+      messageInput.value = samples[mode];
+      resultTitle.textContent = mode === "lab" ? "실험 결과" : mode === "stream" ? "스트리밍 결과" : "상담 결과";
+      setIdle();
+    }
+
+    function reset() {
+      messageInput.value = samples[state.mode];
+      renderEmpty();
+      setIdle();
+    }
+
+    async function run() {
+      if (state.busy) {
+        return;
+      }
+
+      const message = messageInput.value.trim();
+      if (!message) {
+        renderError("문의 내용을 입력해주세요.");
+        return;
+      }
+
+      state.busy = true;
+      state.startedAt = performance.now();
+      runBtn.disabled = true;
+      resetBtn.disabled = true;
+      setStatus("요청 중");
+
+      try {
+        if (state.mode === "stream") {
+          await runStream(message);
+        } else if (state.mode === "lab") {
+          await runLab(message);
+        } else {
+          await runSupport(message);
+        }
+      } catch (error) {
+        renderError(error.message || "요청 처리 중 오류가 발생했습니다.");
+      } finally {
+        state.busy = false;
+        runBtn.disabled = false;
+        resetBtn.disabled = false;
+      }
+    }
+
+    async function runSupport(message) {
+      const data = await postJson(endpoints.support, { message });
+      renderSupport(data, "Structured Output");
+    }
+
+    async function runLab(message) {
+      const repeat = Number(repeatInput.value || 1);
+      const payload = {
+        systemPrompt: systemPromptInput.value,
+        message,
+        repeat
+      };
+      const data = await postJson(endpoints.lab, payload);
+      renderLab(data);
+    }
+
+    async function runStream(message) {
+      renderStream("");
+      const response = await fetch(endpoints.stream, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message })
+      });
+
+      if (!response.ok) {
+        throw new Error(await errorText(response));
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let output = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split(/\n\n/);
+        buffer = events.pop() || "";
+
+        for (const event of events) {
+          output += parseSse(event);
+          renderStream(output);
+        }
+      }
+
+      if (buffer) {
+        output += parseSse(buffer);
+        renderStream(output);
+      }
+
+      setDone("Streaming");
+    }
+
+    async function postJson(url, body) {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+
+      if (!response.ok) {
+        throw new Error(await errorText(response));
+      }
+
+      return response.json();
+    }
+
+    async function errorText(response) {
+      const text = await response.text();
+      return text || `HTTP ${response.status}`;
+    }
+
+    function parseSse(event) {
+      const dataLines = event
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trimStart());
+
+      return dataLines.length > 0 ? dataLines.join("\n") : event;
+    }
+
+    function renderSupport(data, label) {
+      summary.textContent = data.summary || "(summary 없음)";
+      fields.innerHTML = [
+        field("category", data.category),
+        field("urgency", data.urgency),
+        field("nextAction", data.nextAction),
+        field("neededInfo", Array.isArray(data.neededInfo) && data.neededInfo.length ? data.neededInfo.join(", ") : "-"),
+        field("handoffRequired", String(data.handoffRequired)),
+        field("handoffReason", data.handoffReason || "-")
+      ].join("");
+      raw.textContent = JSON.stringify(data, null, 2);
+      setDone(label, data.handoffRequired);
+    }
+
+    function renderLab(data) {
+      const consistency = typeof data.categoryConsistency === "number"
+        ? `${Math.round(data.categoryConsistency * 100)}%`
+        : "-";
+
+      summary.textContent = `총 ${data.totalRuns}회 실행, categoryConsistency ${consistency}`;
+      fields.innerHTML = [
+        field("categoryCounts", stringifyCounts(data.categoryCounts)),
+        field("urgencyCounts", stringifyCounts(data.urgencyCounts)),
+        field("categoryConsistency", consistency),
+        field("totalRuns", data.totalRuns)
+      ].join("");
+      raw.textContent = JSON.stringify(data, null, 2);
+      setDone("Prompt Lab");
+    }
+
+    function renderStream(text) {
+      summary.textContent = text || "스트리밍 응답을 기다리는 중입니다.";
+      fields.innerHTML = [
+        field("mode", "TEXT_EVENT_STREAM"),
+        field("endpoint", endpoints.stream),
+        field("length", text.length),
+        field("state", state.busy ? "streaming" : "done")
+      ].join("");
+      raw.textContent = text;
+      meta.innerHTML = `<span class="pill ok">stream</span>`;
+    }
+
+    function renderError(message) {
+      summary.textContent = message;
+      fields.innerHTML = [
+        field("state", "error"),
+        field("endpoint", endpoints[state.mode]),
+        field("mode", state.mode),
+        field("hint", "Ollama와 Spring Boot 서버 상태를 확인하세요.")
+      ].join("");
+      raw.textContent = message;
+      meta.innerHTML = `<span class="pill warn">오류</span>`;
+      setStatus("오류");
+    }
+
+    function renderEmpty() {
+      summary.textContent = "실행하면 응답이 여기에 표시됩니다.";
+      fields.innerHTML = [
+        field("category", "-"),
+        field("urgency", "-"),
+        field("nextAction", "-"),
+        field("neededInfo", "-")
+      ].join("");
+      raw.textContent = "{}";
+      meta.innerHTML = `<span class="pill">미실행</span>`;
+    }
+
+    function field(name, value) {
+      return `
+        <div class="field">
+          <dt>${escapeHtml(name)}</dt>
+          <dd>${escapeHtml(value == null || value === "" ? "-" : String(value))}</dd>
+        </div>
+      `;
+    }
+
+    function stringifyCounts(counts) {
+      if (!counts || Object.keys(counts).length === 0) {
+        return "-";
+      }
+
+      return Object.entries(counts)
+        .map(([key, value]) => `${key}: ${value}`)
+        .join(", ");
+    }
+
+    function setStatus(text) {
+      statusEl.innerHTML = `<span class="dot" aria-hidden="true"></span><span>${escapeHtml(text)}</span>`;
+    }
+
+    function setIdle() {
+      renderEmpty();
+      setStatus("대기 중");
+    }
+
+    function setDone(label, warn = false) {
+      const elapsed = Math.round(performance.now() - state.startedAt);
+      meta.innerHTML = `
+        <span class="pill ok">${escapeHtml(label)}</span>
+        <span class="pill ${warn ? "warn" : ""}">${elapsed}ms</span>
+      `;
+      setStatus("완료");
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+  </script>
+</body>
+</html>
