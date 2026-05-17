@@ -12,15 +12,20 @@ public record SupportResponse(
         String handoffReason
 ) {
     public SupportResponse {
+        summary = trimToNull(summary);
+        nextAction = trimToNull(nextAction);
         neededInfo = neededInfo == null ? List.of() : List.copyOf(neededInfo);
-
-        if (handoffRequired && (handoffReason == null || handoffReason.isBlank())) {
-            throw new IllegalArgumentException("handoffRequired=true 일 때 handoffReason은 필수입니다.");
-        }
-
-        handoffReason = handoffRequired ? handoffReason.trim() : null;
+        handoffReason = handoffRequired ? trimToNull(handoffReason) : null;
     }
 
     public enum Category { ORDER, DELIVERY, CANCEL, REFUND, PAYMENT, ETC }
     public enum Urgency  { LOW, NORMAL, HIGH, CRITICAL }
+
+    private static String trimToNull(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
 }

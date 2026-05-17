@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+for tool in curl jq awk mktemp seq; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "Missing required tool: $tool" >&2
+    exit 1
+  fi
+done
+
 RESULT="docs/experiment-logs/round1-curl-results.md"
 ADVISOR_LOG="docs/experiment-logs/llm-performance.log"
 TMP_BODY="$(mktemp /tmp/round1-curl-body.XXXXXX.out)"
@@ -86,7 +93,11 @@ append_response() {
     echo
   } >> "$RESULT"
 
-  time_total=$(curl "${curl_opts[@]}" -sS -o "$TMP_BODY" -w "%{time_total}" -X POST "$url" -H 'Content-Type: application/json' -d "$payload")
+  if (( ${#curl_opts[@]} > 0 )); then
+    time_total=$(curl "${curl_opts[@]}" -sS -o "$TMP_BODY" -w "%{time_total}" -X POST "$url" -H 'Content-Type: application/json' -d "$payload")
+  else
+    time_total=$(curl -sS -o "$TMP_BODY" -w "%{time_total}" -X POST "$url" -H 'Content-Type: application/json' -d "$payload")
+  fi
 
   if [[ "$mode" == "json" ]] && jq . "$TMP_BODY" > "$TMP_PRETTY" 2>/dev/null; then
     {

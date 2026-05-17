@@ -6,6 +6,7 @@ import org.springframework.stereotype.Component;
 import java.util.List;
 import java.util.Locale;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 @Component
 public class SupportResponseValidator {
@@ -45,9 +46,18 @@ public class SupportResponseValidator {
             return fallback("LLM 응답이 비어 있어 상담원 확인이 필요합니다.");
         }
 
+        if (hasInvalidCoreFields(response)) {
+            return fallback("LLM 응답의 필수 필드가 비어 있어 상담원 확인이 필요합니다.");
+        }
+
+        if (response.handoffRequired() && !hasText(response.handoffReason())) {
+            return fallback("상담원 전환 사유가 비어 있어 상담원 확인이 필요합니다.");
+        }
+
         String content = String.join(" ",
                 text(response.summary()),
                 text(response.nextAction()),
+                text(response.neededInfo()),
                 text(response.handoffReason())
         );
 
@@ -85,6 +95,13 @@ public class SupportResponseValidator {
                 || ACCOUNT_NUMBER.matcher(content).find();
     }
 
+    private boolean hasInvalidCoreFields(SupportResponse response) {
+        return !hasText(response.summary())
+                || response.category() == null
+                || response.urgency() == null
+                || !hasText(response.nextAction());
+    }
+
     private SupportResponse fallback(String reason) {
         return new SupportResponse(
                 "정책 확인이 필요한 응답이 감지되어 상담원 확인으로 전환합니다.",
@@ -97,8 +114,21 @@ public class SupportResponseValidator {
         );
     }
 
+    private boolean hasText(String value) {
+        return value != null && !value.isBlank();
+    }
+
     private String text(String value) {
         return value == null ? "" : value;
+    }
+
+    private String text(List<String> values) {
+        if (values == null) {
+            return "";
+        }
+        return values.stream()
+                .map(this::text)
+                .collect(Collectors.joining(" "));
     }
 
     private static String normalize(String value) {
