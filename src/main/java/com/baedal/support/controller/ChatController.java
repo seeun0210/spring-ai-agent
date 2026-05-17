@@ -1,6 +1,7 @@
 package com.baedal.support.controller;
 
 import com.baedal.support.dto.ChatRequest;
+import jakarta.validation.Valid;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.web.bind.annotation.*;
@@ -18,7 +19,7 @@ public class ChatController {
     }
 
     @PostMapping
-    public String chat(@RequestBody ChatRequest request) {
+    public String chat(@Valid @RequestBody ChatRequest request) {
         return syncChatClient
                 .prompt()
                 .user(request.message())

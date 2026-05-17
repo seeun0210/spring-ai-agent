@@ -91,11 +91,11 @@ public class PerformanceLoggingAdvisor implements CallAdvisor, StreamAdvisor {
                 .doOnError(error -> {
                     long elapsedMs = System.currentTimeMillis() - startedAt;
                     log.warn(
-                            "LLM stream failed. endpoint={}, elapsedMs={}, chunks={}, error={}",
+                            "LLM stream failed. endpoint={}, elapsedMs={}, chunks={}",
                             endpoint,
                             elapsedMs,
                             chunks.get(),
-                            error.toString()
+                            error
                     );
                 });
     }

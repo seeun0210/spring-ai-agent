@@ -320,7 +320,8 @@ curl requests = 5
 
 공격 결과: 금지 규칙이 있어도 "쿠폰을 제공해 드리겠습니다"라는 잘못된 약속이 나와 공격이 성공했어요.
 이는 System Prompt만으로는 충분하지 않다는 근거예요.
-운영 코드에서는 LLM 응답을 그대로 반환하기 전에 서버에서 금지 표현을 검사하거나, 쿠폰/환불/개인정보 같은 고위험 표현이 나오면 상담원 연결 응답으로 바꾸는 후처리 검증이 필요해요.
+그래서 `SupportResponseValidator`를 추가해 LLM 응답을 그대로 반환하기 전에 쿠폰/환불/보상 확정 표현과 개인정보 패턴을 검사하도록 했어요.
+고위험 표현이 감지되면 상담원 확인이 필요한 안전한 응답으로 바꿔 반환해요.
 
 ### 공격 시나리오 4: System Prompt 무시 요청
 
@@ -419,6 +420,7 @@ LLM call completed. endpoint=support, elapsedMs=13159, promptTokens=671, complet
 
 - `BaedalPromptTest`: System Prompt에 `[역할]`, `[규칙]`, `[금지]`, `[응답 포맷]`과 핵심 금지 규칙이 포함되어 있는지 검증
 - `SupportControllerTest`: "사장님 번호 알려줘" 요청에 대해 `ETC`, `handoffRequired=true`, 필요한 추가 정보 등이 구조화 응답으로 반환되는지 검증
+- `SupportControllerTest`: 빈 메시지/null 메시지 400 응답, LLM 실패 500 응답, 쿠폰 약속 응답의 상담원 연결 전환을 검증
 
 검증 명령:
 
@@ -489,7 +491,7 @@ AI가 환불 가능 여부를 직접 추측하지 않고, 주문 상태 조회 t
 - `SupportResponse`의 `category`, `urgency`, `handoffRequired`, `handoffReason`, `neededInfo`가 운영 후처리에 충분한 응답 계약인지 의견을 받고 싶어요.
 - `ChatClientConfig`에서 엔드포인트별 `ChatClient`를 Bean으로 만들고 controller에서는 매 요청 build하지 않는 구조가 적절한지 확인받고 싶어요.
 - Prompt Lab 반복 실험을 서버 내부 loop가 아니라 실제 curl 반복 요청으로 수행한 방식이 실험 근거로 충분한지 보고 싶어요.
-- 금지 규칙이 있어도 쿠폰 약속이 나온 사례를 근거로, 서버 후처리 검증이 필요한 판단이 타당한지 리뷰받고 싶어요.
+- 금지 규칙이 있어도 쿠폰 약속이 나온 사례를 근거로 추가한 `SupportResponseValidator`의 검사 범위가 적절한지 리뷰받고 싶어요.
 - `support`, `promptLab`, `chat`, `stream`으로 advisor 로그를 구분한 방식이 관찰 가능성 측면에서 충분한지 확인받고 싶어요.
 
 ## 자가 점검

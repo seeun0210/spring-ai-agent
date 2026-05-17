@@ -591,6 +591,10 @@ summary, category, urgency, nextAction, neededInfo, handoffRequired, handoffReas
         throw new Error(await errorText(response));
       }
 
+      if (!response.body) {
+        throw new Error("이 브라우저에서는 스트리밍 응답을 읽을 수 없습니다.");
+      }
+
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -603,7 +607,7 @@ summary, category, urgency, nextAction, neededInfo, handoffRequired, handoffReas
         }
 
         buffer += decoder.decode(value, { stream: true });
-        const events = buffer.split(/\n\n/);
+        const events = buffer.split(/\r?\n\r?\n/);
         buffer = events.pop() || "";
 
         for (const event of events) {
@@ -641,7 +645,7 @@ summary, category, urgency, nextAction, neededInfo, handoffRequired, handoffReas
 
     function parseSse(event) {
       const dataLines = event
-        .split("\n")
+        .split(/\r?\n/)
         .filter((line) => line.startsWith("data:"))
         .map((line) => line.slice(5).trimStart());
 

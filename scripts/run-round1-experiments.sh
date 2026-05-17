@@ -3,10 +3,11 @@ set -euo pipefail
 
 RESULT="docs/experiment-logs/round1-curl-results.md"
 ADVISOR_LOG="docs/experiment-logs/llm-performance.log"
-TMP_BODY="/tmp/round1-curl-body.out"
-TMP_PRETTY="/tmp/round1-curl-body.pretty"
-TMP_SERIES="/tmp/round1-curl-series.json"
-TMP_SERIES_NEXT="/tmp/round1-curl-series.next.json"
+TMP_BODY="$(mktemp /tmp/round1-curl-body.XXXXXX.out)"
+TMP_PRETTY="$(mktemp /tmp/round1-curl-body.XXXXXX.pretty)"
+TMP_SERIES="$(mktemp /tmp/round1-curl-series.XXXXXX.json)"
+TMP_SERIES_NEXT="$(mktemp /tmp/round1-curl-series-next.XXXXXX.json)"
+trap 'rm -f "$TMP_BODY" "$TMP_PRETTY" "$TMP_SERIES" "$TMP_SERIES_NEXT"' EXIT INT TERM
 
 BASE="${BASE:-http://localhost:18080}"
 OLLAMA="${OLLAMA:-http://localhost:11434}"

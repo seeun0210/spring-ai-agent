@@ -3,6 +3,7 @@ package com.baedal.support.controller;
 import com.baedal.support.dto.SupportResponse;
 import com.baedal.support.dto.PromptLabRequest;
 import com.baedal.support.prompt.BaedalPrompt;
+import jakarta.validation.Valid;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.web.bind.annotation.*;
@@ -20,7 +21,7 @@ public class PromptLabController {
     }
 
     @PostMapping
-    public SupportResponse experiment(@RequestBody PromptLabRequest req) {
+    public SupportResponse experiment(@Valid @RequestBody PromptLabRequest req) {
         String systemPrompt = req.systemPrompt() == null || req.systemPrompt().isBlank()
                 ? BaedalPrompt.SYSTEM_PROMPT
                 : req.systemPrompt();

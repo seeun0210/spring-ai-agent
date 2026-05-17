@@ -11,6 +11,11 @@ public record SupportResponse(
         boolean handoffRequired,
         String handoffReason
 ) {
+    public SupportResponse {
+        neededInfo = neededInfo == null ? List.of() : List.copyOf(neededInfo);
+        handoffReason = handoffRequired ? handoffReason : null;
+    }
+
     public enum Category { ORDER, DELIVERY, CANCEL, REFUND, PAYMENT, ETC }
     public enum Urgency  { LOW, NORMAL, HIGH, CRITICAL }
 }
