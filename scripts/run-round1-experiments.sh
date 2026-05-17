@@ -63,8 +63,13 @@ append_response() {
   local payload="$3"
   local mode="${4:-json}"
   local curl_flag="${5:-}"
+  local -a curl_opts=()
   local compact
   local time_total
+
+  if [[ -n "$curl_flag" ]]; then
+    read -r -a curl_opts <<< "$curl_flag"
+  fi
 
   compact=$(printf '%s' "$payload" | jq -c .)
 
@@ -81,11 +86,7 @@ append_response() {
     echo
   } >> "$RESULT"
 
-  if [[ -n "$curl_flag" ]]; then
-    time_total=$(curl $curl_flag -sS -o "$TMP_BODY" -w "%{time_total}" -X POST "$url" -H 'Content-Type: application/json' -d "$payload")
-  else
-    time_total=$(curl -sS -o "$TMP_BODY" -w "%{time_total}" -X POST "$url" -H 'Content-Type: application/json' -d "$payload")
-  fi
+  time_total=$(curl "${curl_opts[@]}" -sS -o "$TMP_BODY" -w "%{time_total}" -X POST "$url" -H 'Content-Type: application/json' -d "$payload")
 
   if [[ "$mode" == "json" ]] && jq . "$TMP_BODY" > "$TMP_PRETTY" 2>/dev/null; then
     {
@@ -196,7 +197,7 @@ append_response "1단계 시나리오 2 - 취소와 환불 문의" "$BASE/api/v1
 append_response "1단계 시나리오 3 - 배달 중 음식 파손" "$BASE/api/v1/support" "$(jq -n --arg message "$SPILL_MSG" '{message:$message}')"
 
 append_prompt_lab_series "2단계 Prompt Lab - 단순 프롬프트 curl 5회" "$SIMPLE_PROMPT" "$DELIVERY_MSG" 5
-append_prompt_lab_series "2단계 Prompt Lab - 구조화 프롬프트 curl 5회" "" "$DELIVERY_MSG" 5
+append_prompt_lab_series "2단계 Prompt Lab - 구조화 프롬프트 curl 5회" "$STRUCTURED_PROMPT" "$DELIVERY_MSG" 5
 
 append_response "정책 취약성 관찰 1A - 개인정보 요청 금지 있음" "$BASE/api/v1/support" "$(jq -n --arg message "$PHONE_MSG" '{message:$message}')"
 append_response "정책 취약성 관찰 1B - 개인정보 요청 금지 없음" "$BASE/api/v1/prompt-lab" "$(jq -n --arg systemPrompt "$NO_BAN_PROMPT" --arg message "$PHONE_MSG" '{systemPrompt:$systemPrompt,message:$message}')"

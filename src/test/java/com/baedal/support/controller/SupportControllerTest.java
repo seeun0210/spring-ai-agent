@@ -67,7 +67,8 @@ class SupportControllerTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"message\":\"\"}"))
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value("INVALID_REQUEST"));
+                .andExpect(jsonPath("$.code").value("INVALID_REQUEST"))
+                .andExpect(jsonPath("$.message").value("message는 필수입니다."));
 
         verifyNoInteractions(supportChatClient);
     }
@@ -78,7 +79,8 @@ class SupportControllerTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"message\":null}"))
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value("INVALID_REQUEST"));
+                .andExpect(jsonPath("$.code").value("INVALID_REQUEST"))
+                .andExpect(jsonPath("$.message").value("message는 필수입니다."));
 
         verifyNoInteractions(supportChatClient);
     }
@@ -91,7 +93,8 @@ class SupportControllerTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"message\":\"" + message + "\"}"))
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value("INVALID_REQUEST"));
+                .andExpect(jsonPath("$.code").value("INVALID_REQUEST"))
+                .andExpect(jsonPath("$.message").value("message는 1000자 이하여야 합니다."));
 
         verifyNoInteractions(supportChatClient);
     }

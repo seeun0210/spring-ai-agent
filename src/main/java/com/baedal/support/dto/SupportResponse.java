@@ -13,7 +13,12 @@ public record SupportResponse(
 ) {
     public SupportResponse {
         neededInfo = neededInfo == null ? List.of() : List.copyOf(neededInfo);
-        handoffReason = handoffRequired ? handoffReason : null;
+
+        if (handoffRequired && (handoffReason == null || handoffReason.isBlank())) {
+            throw new IllegalArgumentException("handoffRequired=true 일 때 handoffReason은 필수입니다.");
+        }
+
+        handoffReason = handoffRequired ? handoffReason.trim() : null;
     }
 
     public enum Category { ORDER, DELIVERY, CANCEL, REFUND, PAYMENT, ETC }

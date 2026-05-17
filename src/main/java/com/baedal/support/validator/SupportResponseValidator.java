@@ -17,6 +17,7 @@ public class SupportResponseValidator {
             "쿠폰 지급",
             "환불해 드리",
             "환불을 처리",
+            "환불 처리",
             "보상해 드리",
             "보상을 제공"
     );
@@ -48,7 +49,10 @@ public class SupportResponseValidator {
     }
 
     private boolean containsForbiddenPromise(String content) {
-        return FORBIDDEN_PROMISES.stream().anyMatch(content::contains);
+        String normalizedContent = normalize(content);
+        return FORBIDDEN_PROMISES.stream()
+                .map(this::normalize)
+                .anyMatch(normalizedContent::contains);
     }
 
     private boolean containsPersonalInformation(String content) {
@@ -71,5 +75,9 @@ public class SupportResponseValidator {
 
     private String text(String value) {
         return value == null ? "" : value;
+    }
+
+    private String normalize(String value) {
+        return text(value).replaceAll("\\s+", "");
     }
 }

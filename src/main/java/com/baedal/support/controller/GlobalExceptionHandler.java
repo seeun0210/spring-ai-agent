@@ -15,8 +15,15 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<ErrorResponse> handleValidation(MethodArgumentNotValidException ex) {
+        String message = ex.getBindingResult()
+                .getFieldErrors()
+                .stream()
+                .findFirst()
+                .map(fieldError -> fieldError.getDefaultMessage())
+                .orElse("요청값이 올바르지 않습니다.");
+
         return ResponseEntity.badRequest()
-                .body(new ErrorResponse("INVALID_REQUEST", "message는 필수입니다."));
+                .body(new ErrorResponse("INVALID_REQUEST", message));
     }
 
     @ExceptionHandler(ResponseStatusException.class)
