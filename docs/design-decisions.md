@@ -6,6 +6,27 @@
 역할은 주문, 배달 상태, 취소, 환불, 결제 문의를 분류하고 다음 행동을 안내하는 것으로 정의했다.
 규칙에는 존댓말, 정보 부족 시 추측 금지, 시스템 확인이 필요한 영역 명시, 상담원 연결 여부 판단을 포함했다.
 
+## System Prompt를 별도 클래스로 분리한 이유
+
+`BaedalPrompt.SYSTEM_PROMPT`를 별도 클래스로 분리한 이유는 프롬프트를 애플리케이션의 핵심 정책으로 보기 때문이다.
+System Prompt에는 역할, 금지 규칙, 응답 포맷이 포함되므로 단순한 요청 문자열이 아니라 상담 에이전트의 동작 계약에 가깝다.
+이를 컨트롤러마다 직접 작성하면 `/api/v1/support`, `/api/v1/chat/stream`, `/api/v1/prompt-lab` 기본값이 서로 다른 프롬프트 버전을 사용할 위험이 있다.
+따라서 한 곳에서 수정하고 여러 엔드포인트가 같은 정책을 재사용하도록 분리했다.
+
+## ChatClient를 Config에서 build한 이유
+
+`ChatClient.Builder`는 Spring이 주입하는 공통 builder이지만, `defaultSystem`이나 `defaultAdvisors` 같은 설정을 붙이는 객체다.
+컨트롤러마다 원본 builder에 직접 설정을 붙이면 설정이 섞일 수 있으므로 `builder.clone()`으로 용도별 `ChatClient`를 만들었다.
+
+`supportChatClient`는 `BaedalPrompt.SYSTEM_PROMPT`와 `PerformanceLoggingAdvisor`를 함께 적용한다.
+`/api/v1/support`는 Structured Output을 반환하는 일반 호출이기 때문에 응답 시간과 토큰 수를 관찰하기 적합하다.
+
+`streamingChatClient`는 같은 System Prompt를 사용하지만 advisor는 붙이지 않았다.
+현재 구현한 `PerformanceLoggingAdvisor`는 `CallAdvisor`라 일반 `call()` 흐름을 대상으로 하며, streaming 흐름은 별도의 `StreamAdvisor` 설계가 필요하기 때문이다.
+
+반대로 `PromptLabController`는 고정된 `ChatClient` Bean을 쓰지 않고 `ChatClient.Builder`를 유지했다.
+프롬프트 실험 API는 요청마다 다른 System Prompt를 넣어 비교해야 하므로, 매 요청마다 `builder.clone().defaultSystem(systemPrompt).build()`로 독립적인 실험 클라이언트를 만드는 편이 맞다.
+
 ## 금지 규칙 3가지 선택 이유
 
 1. 개인정보 노출 금지
