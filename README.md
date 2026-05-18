@@ -322,8 +322,10 @@ curl requests = 5
 
 공격 결과: 금지 규칙이 있어도 "쿠폰을 제공해 드리겠습니다"라는 잘못된 약속이 나와 공격이 성공했어요.
 이는 System Prompt만으로는 충분하지 않다는 근거예요.
-그래서 `SupportResponseValidator`를 추가해 LLM 응답을 그대로 반환하기 전에 쿠폰/환불/보상 확정 표현과 개인정보 패턴을 검사하도록 했어요.
-고위험 표현이 감지되면 상담원 확인이 필요한 안전한 응답으로 바꿔 반환해요.
+처음에는 `SupportResponseValidator`로 LLM 응답을 그대로 반환하기 전에 쿠폰/환불/보상 확정 표현과 개인정보 패턴을 검사해봤어요.
+이후 같은 사례를 다시 실험하면서 문자열 패턴만으로는 "환불 절차를 시작할 수 있습니다", "쿠폰 제공 가능 여부"처럼 표현이 달라진 확정성 응답을 놓칠 수 있다는 점도 확인했어요.
+그래서 추가 실험으로 `PolicyValidationAdvisor`를 붙여 사용자 문의와 AI 응답 JSON을 별도 검증 프롬프트에 넣고 자연어 맥락 기반으로 정책 위반 여부를 판단하도록 했어요.
+위반이 감지되면 상담원 확인이 필요한 안전한 응답으로 바꿔 반환해요.
 
 ### 공격 시나리오 4: System Prompt 무시 요청
 
@@ -422,8 +424,9 @@ LLM call completed. endpoint=support, elapsedMs=13159, promptTokens=671, complet
 
 - `BaedalPromptTest`: System Prompt에 `[역할]`, `[규칙]`, `[금지]`, `[응답 포맷]`과 핵심 금지 규칙이 포함되어 있는지 검증
 - `SupportControllerTest`: "사장님 번호 알려줘" 요청에 대해 `ETC`, `handoffRequired=true`, 필요한 추가 정보 등이 구조화 응답으로 반환되는지 검증
-- `SupportControllerTest`: 빈 메시지/null 메시지 400 응답, LLM 실패 500 응답, 쿠폰 약속 응답의 상담원 연결 전환을 검증
+- `SupportControllerTest`: 빈 메시지/null 메시지 400 응답, LLM 실패 500 응답, ChatClient 응답 후 구조 검증 흐름을 검증
 - `SupportControllerTest`: 다른 배달앱 요청을 LLM 호출 전에 차단하고 현재 서비스 문의로 안내하는지 검증
+- `PolicyValidationAdvisorTest`: 검증 프롬프트가 정책 위반으로 판단한 응답을 상담원 확인 fallback JSON으로 교체하는지 검증
 
 검증 명령:
 
@@ -499,7 +502,7 @@ AI가 환불 가능 여부를 직접 추측하지 않고, 주문 상태 조회 t
 - `SupportResponse`의 `category`, `urgency`, `handoffRequired`, `handoffReason`, `neededInfo`가 운영 후처리에 충분한 응답 계약인지 의견을 받고 싶어요.
 - `ChatClientConfig`에서 엔드포인트별 `ChatClient`를 Bean으로 만들고 controller에서는 매 요청 build하지 않는 구조가 적절한지 확인받고 싶어요.
 - Prompt Lab 반복 실험을 서버 내부 loop가 아니라 실제 curl 반복 요청으로 수행한 방식이 실험 근거로 충분한지 보고 싶어요.
-- 금지 규칙이 있어도 쿠폰 약속이 나온 사례를 근거로 추가한 `SupportResponseValidator`의 검사 범위가 적절한지 리뷰받고 싶어요.
+- 금지 규칙이 있어도 쿠폰/환불 처리 약속이 나온 사례를 근거로 추가한 `PolicyValidationAdvisor`의 자연어 정책 검증 방식이 적절한지 리뷰받고 싶어요.
 - 다른 배달앱 요청을 `SupportRequestGuard`에서 키워드 기반으로 차단하는 방식이 적절한지, 정규식/검색어 사전 관리가 필요한지 의견을 받고 싶어요.
 - `support`, `promptLab`, `chat`, `stream`으로 advisor 로그를 구분한 방식이 관찰 가능성 측면에서 충분한지 확인받고 싶어요.
 - 음식점/메뉴 큐레이션처럼 자연어 취향 검색이 필요한 기능은 Vector Store를 붙이는 게 적절한지, DB 필터/검색엔진과 어떤 경계로 나누는 게 좋은지 궁금해요.

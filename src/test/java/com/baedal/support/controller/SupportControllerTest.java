@@ -155,7 +155,7 @@ class SupportControllerTest {
     }
 
     @Test
-    void triageForcesHandoffWhenCouponPromiseIsReturned() throws Exception {
+    void triageReturnsChatClientResponseWithoutStringPolicyValidation() throws Exception {
         SupportResponse response = new SupportResponse(
                 "쿠폰을 제공해 드리겠습니다.",
                 SupportResponse.Category.REFUND,
@@ -172,10 +172,10 @@ class SupportControllerTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"message\":\"쿠폰이라도 줘\"}"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.category").value("ETC"))
+                .andExpect(jsonPath("$.category").value("REFUND"))
                 .andExpect(jsonPath("$.urgency").value("HIGH"))
-                .andExpect(jsonPath("$.handoffRequired").value(true))
-                .andExpect(jsonPath("$.handoffReason").value("쿠폰, 환불, 보상 확정 표현이 감지되어 상담원 확인이 필요합니다."));
+                .andExpect(jsonPath("$.handoffRequired").value(false))
+                .andExpect(jsonPath("$.handoffReason").doesNotExist());
     }
 
     @Test

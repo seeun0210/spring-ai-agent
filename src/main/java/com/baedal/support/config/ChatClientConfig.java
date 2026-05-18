@@ -1,9 +1,12 @@
 package com.baedal.support.config;
 
 import com.baedal.support.advisor.PerformanceLoggingAdvisor;
+import com.baedal.support.advisor.PolicyValidationAdvisor;
 import com.baedal.support.prompt.BaedalPrompt;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -33,10 +36,24 @@ public class ChatClientConfig {
     }
 
     @Bean
-    public ChatClient supportChatClient() {
+    public ChatClient policyValidationChatClient() {
+        return builder.clone()
+                .build();
+    }
+
+    @Bean
+    public PolicyValidationAdvisor policyValidationAdvisor(
+            @Qualifier("policyValidationChatClient") ChatClient policyValidationChatClient,
+            ObjectMapper objectMapper
+    ) {
+        return new PolicyValidationAdvisor(policyValidationChatClient, objectMapper);
+    }
+
+    @Bean
+    public ChatClient supportChatClient(PolicyValidationAdvisor policyValidationAdvisor) {
         return builder.clone()
                 .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
-                .defaultAdvisors(supportPerformanceLoggingAdvisor())
+                .defaultAdvisors(policyValidationAdvisor, supportPerformanceLoggingAdvisor())
                 .build();
     }
 
