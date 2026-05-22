@@ -18,10 +18,12 @@ public class OrderMockService {
 
     @PostConstruct
     void seed() {
+        orders.clear();
         OffsetDateTime baseTime = OffsetDateTime.parse("2024-05-17T12:00:00+09:00");
 
         put(new Order(
                 "2024-1234",
+                "customer-1",
                 OrderStatus.DELIVERING,
                 List.of(
                         new OrderItem("허니콤보", 1, 23000),
@@ -33,6 +35,7 @@ public class OrderMockService {
         ));
         put(new Order(
                 "2024-1235",
+                "customer-1",
                 OrderStatus.CREATED,
                 List.of(
                         new OrderItem("떡볶이", 1, 9000),
@@ -44,6 +47,7 @@ public class OrderMockService {
         ));
         put(new Order(
                 "2024-1236",
+                "customer-1",
                 OrderStatus.DELIVERED,
                 List.of(
                         new OrderItem("김치찌개", 1, 11000),
@@ -55,6 +59,7 @@ public class OrderMockService {
         ));
         put(new Order(
                 "2024-1237",
+                "customer-1",
                 OrderStatus.COOKING,
                 List.of(
                         new OrderItem("불고기버거", 2, 7000),
@@ -67,6 +72,7 @@ public class OrderMockService {
 
         Order canceledOrder = new Order(
                 "2024-1238",
+                "customer-1",
                 OrderStatus.ACCEPTED,
                 List.of(
                         new OrderItem("마라탕", 1, 15000),
@@ -81,6 +87,7 @@ public class OrderMockService {
 
         put(new Order(
                 "2024-1239",
+                "customer-1",
                 OrderStatus.ACCEPTED,
                 List.of(
                         new OrderItem("초밥 세트", 1, 18000),
@@ -96,6 +103,11 @@ public class OrderMockService {
 
     public Optional<Order> findById(String orderId) {
         return Optional.ofNullable(orders.get(orderId));
+    }
+
+    public Optional<Order> findByIdForCustomer(String orderId, String customerId) {
+        return findById(orderId)
+                .filter(order -> order.getCustomerId().equals(customerId));
     }
 
     private void put(Order order) {

@@ -496,6 +496,12 @@ Tool별 view를 분리하면 LLM이 필요 이상의 정보를 근거로 답변�
 지금 분리하면 클래스 수만 늘고 Tool 목록을 한눈에 보기 어려워져서 하나로 충분하다고 봤어요.
 다만 기능이 늘어난다면 `OrderQueryTools`와 `OrderCommandTools`처럼 조회와 변경을 나누거나, 결제/환불 Tool이 생기면 `PaymentTools`로 분리하는 기준이 적절해요.
 
+주문 조회는 주문번호만으로 처리하지 않고, 서버가 알고 있는 현재 고객 ID와 주문 소유자를 함께 확인하도록 했어요.
+주문번호는 고객 화면, 알림, 문의 과정에서 노출될 수 있으므로 주문번호만 맞으면 조회되는 구조는 다른 고객 주문이 노출되는 IDOR 위험이 있어요.
+그래서 `OrderMockService.findByIdForCustomer(orderId, customerId)`로 조회하고, 소유자가 다르면 존재하지 않는 주문처럼 `null` 또는 `NOT_FOUND`를 반환해 주문 존재 여부도 자세히 드러내지 않도록 했어요.
+이번 과제에서는 실제 인증이 없으므로 `CurrentCustomerProvider`가 기본값 `customer-1`을 사용하고, 로컬 실험용으로만 `X-Customer-Id` 헤더를 읽게 했어요.
+운영 코드라면 이 헤더를 신뢰하면 안 되고, Spring Security의 인증 컨텍스트나 세션에서 검증된 사용자 ID를 가져와야 해요.
+
 ## 테스트 코드
 
 기본 검증은 실제 Ollama를 호출하지 않는 단위/웹 계층 테스트로 작성했어요.
@@ -610,3 +616,4 @@ AI가 환불 가능 여부를 직접 추측하지 않고, 주문 상태 조회 t
 - [x] Mock 주문 4건이 실제로 `seed()`에 추가되었는가? (`OrderMockService seeded — 6건` 로그로 확인)
 - [x] `2024-1238` 주문에 `order.cancel("고객 요청", ...)` 호출이 포함되어 `canceledReason`이 채워져 있는가?
 - [x] 설계 결정 3개 질문에 대한 "왜?" 답이 README에 있는가?
+- [x] 주문 조회/취소 Tool이 현재 고객 소유 주문만 반환하도록 검증하는가?

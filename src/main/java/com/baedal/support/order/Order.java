@@ -6,6 +6,7 @@ import java.util.List;
 public class Order {
 
     private final String orderId;
+    private final String customerId;
     private final List<OrderItem> items;
     private final String deliveryAddress;
     private final OffsetDateTime orderedAt;
@@ -16,6 +17,7 @@ public class Order {
 
     public Order(
             String orderId,
+            String customerId,
             OrderStatus status,
             List<OrderItem> items,
             String deliveryAddress,
@@ -23,6 +25,7 @@ public class Order {
             OffsetDateTime orderedAt
     ) {
         this.orderId = orderId;
+        this.customerId = customerId;
         this.status = status;
         this.items = List.copyOf(items);
         this.deliveryAddress = deliveryAddress;
@@ -32,6 +35,10 @@ public class Order {
 
     public String getOrderId() {
         return orderId;
+    }
+
+    public String getCustomerId() {
+        return customerId;
     }
 
     public OrderStatus getStatus() {

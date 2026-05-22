@@ -15,6 +15,7 @@ public class OrderTools {
 
     private final OrderMockService orderMockService;
     private final OrderViewConverter orderViewConverter;
+    private final CurrentCustomerProvider currentCustomerProvider;
 
     @Tool(
             name = "getOrderDetail",
@@ -25,7 +26,7 @@ public class OrderTools {
     ) {
         log.info("[Tool] getOrderDetail(orderId={})", orderId);
 
-        return orderMockService.findById(orderId)
+        return orderMockService.findByIdForCustomer(orderId, currentCustomerProvider.currentCustomerId())
                 .map(orderViewConverter::toDetailView)
                 .orElse(null);
     }
@@ -39,7 +40,7 @@ public class OrderTools {
     ) {
         log.info("[Tool] getDeliveryStatus(orderId={})", orderId);
 
-        return orderMockService.findById(orderId)
+        return orderMockService.findByIdForCustomer(orderId, currentCustomerProvider.currentCustomerId())
                 .map(orderViewConverter::toDeliveryStatusView)
                 .orElse(null);
     }
@@ -54,7 +55,7 @@ public class OrderTools {
     ) {
         log.info("[Tool] cancelOrder(orderId={}, reason={})", orderId, reason);
 
-        return orderMockService.findById(orderId)
+        return orderMockService.findByIdForCustomer(orderId, currentCustomerProvider.currentCustomerId())
                 .map(order -> cancelExistingOrder(order, reason))
                 .orElseGet(() -> new CancelOrderResult(
                         orderId,
