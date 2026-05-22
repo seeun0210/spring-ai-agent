@@ -2,6 +2,7 @@ package com.baedal.support.config;
 
 import com.baedal.support.advisor.PerformanceLoggingAdvisor;
 import com.baedal.support.advisor.PolicyValidationAdvisor;
+import com.baedal.support.order.OrderTools;
 import com.baedal.support.prompt.BaedalPrompt;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -50,17 +51,22 @@ public class ChatClientConfig {
     }
 
     @Bean
-    public ChatClient supportChatClient(PolicyValidationAdvisor policyValidationAdvisor) {
+    public ChatClient supportChatClient(
+            PolicyValidationAdvisor policyValidationAdvisor,
+            OrderTools orderTools
+    ) {
         return builder.clone()
                 .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
+                .defaultTools(orderTools)
                 .defaultAdvisors(policyValidationAdvisor, supportPerformanceLoggingAdvisor())
                 .build();
     }
 
     @Bean
-    public ChatClient syncChatClient() {
+    public ChatClient syncChatClient(OrderTools orderTools) {
         return builder.clone()
                 .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
+                .defaultTools(orderTools)
                 .defaultAdvisors(chatPerformanceLoggingAdvisor())
                 .build();
     }

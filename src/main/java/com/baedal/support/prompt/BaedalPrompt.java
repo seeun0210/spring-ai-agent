@@ -13,6 +13,9 @@ public final class BaedalPrompt {
             - 고객 문의를 ORDER, DELIVERY, CANCEL, REFUND, PAYMENT, ETC 중 하나로 분류합니다.
             - 정보가 부족하면 추측하지 말고, neededInfo에 필요한 정보를 적습니다.
             - 실제 주문 상태, 환불 가능 여부, 결제 취소 가능 여부는 시스템 확인이 필요하다고 안내합니다.
+            - 주문번호가 있고 주문 메뉴, 배달 상태, 주문 취소를 물으면 반드시 사용 가능한 Tool로 실제 Mock 주문을 조회합니다.
+            - Tool 조회 결과가 없으면 주문을 찾을 수 없다고 안내하고 추측하지 않습니다.
+            - Tool 결과의 outcome, status, riderLocation, items 값을 우선해서 답변합니다.
             - 상담원이 확인해야 하는 사안이면 handoffRequired를 true로 설정하고 handoffReason에 사유를 적습니다.
             - urgency는 고객 피해 가능성, 결제/환불 영향, 배달 지연 정도를 기준으로 판단합니다.
 

@@ -446,6 +446,56 @@ LLM call completed. endpoint=support, elapsedMs=13159, promptTokens=671, complet
 `qwen3:4b`는 생각 과정을 길게 생성하는 경향이 있어 completionTokens가 크게 나왔어요.
 운영 환경에서는 모델 선택, thinking 비활성화 가능 여부, 최대 토큰 제한을 함께 검토해야 해요.
 
+## Tool Calling 사전 실험
+
+`/api/v1/assistant`에 `OrderTools`를 등록한 뒤, 하나의 요청 안에 메뉴 조회와 배달 상태 조회 의도를 함께 넣어 Tool 선택이 어떻게 되는지 확인했어요.
+상태를 바꾸는 `cancelOrder`는 제외하고, read-only Tool 두 개가 함께 호출되는지만 먼저 봤어요.
+
+```bash
+curl -s -X POST http://localhost:18081/api/v1/assistant \
+  -H "Content-Type: application/json" \
+  -d '{"message":"주문번호 2024-1234 어떤 메뉴 주문했는지랑 배달 어디쯤인지 같이 알려줘"}'
+```
+
+응답:
+
+```text
+핵심 답변: 주문한 메뉴는 허니콤보 1개와 콜라 1개로 총 25,000원입니다. 배달 상태는 진행 중이며, 라이더가 역삼역 사거리에 도착했습니다.
+
+필요한 추가 정보: [없음]
+
+다음에 할 행동: 더 궁금한 점이 있으면 언제든지 알려주세요.
+```
+
+콘솔 Tool 로그:
+
+```text
+Executing tool call: getOrderDetail
+[Tool] getOrderDetail(orderId=2024-1234)
+Executing tool call: getDeliveryStatus
+[Tool] getDeliveryStatus(orderId=2024-1234)
+```
+
+이 실험에서는 모델이 요청 의도를 메뉴 조회와 배달 위치 조회로 나누어 `getOrderDetail`과 `getDeliveryStatus`를 순서대로 모두 호출했어요.
+따라서 한 문장에 여러 주문 관련 의도가 들어와도 Tool description과 파라미터 설명이 충분하면 여러 Tool 결과를 합쳐 답변할 수 있음을 확인했어요.
+다만 "취소 가능한지 봐줘"처럼 조회 의도와 변경 의도가 애매한 문장은 `cancelOrder`를 잘못 호출할 수 있으므로, 이후 단계에서는 취소 가능 여부 조회와 실제 취소 실행을 분리할지 검토해야 해요.
+
+### Tool 설계 결정
+
+`OrderDetailView`는 내부 `Order`의 `deliveryAddress`, `canceledReason`, `canceledAt`, `riderLocation`을 의도적으로 제외했어요.
+메뉴 조회 Tool의 목적은 고객이 어떤 메뉴를 주문했는지 확인하는 것이므로 `items`, `totalPrice`, `status`, `orderedAt`만 있어도 충분해요.
+주소는 개인정보 성격이 있고, 취소 사유와 취소 시각은 취소 결과 Tool의 책임이며, 라이더 위치는 배달 상태 Tool의 책임이라서 상세 메뉴 조회 응답에 섞지 않았어요.
+Tool별 view를 분리하면 LLM이 필요 이상의 정보를 근거로 답변하거나 개인정보를 노출할 가능성을 줄일 수 있어요.
+
+`@Tool`과 `@ToolParam`의 `description`은 한국어로 작성했어요.
+현재 System Prompt와 사용자 입력, 응답 정책이 모두 한국어이고, 과제 시나리오도 한국어 주문 상담 문장이라 모델이 같은 언어권 표현으로 Tool의 용도를 이해하도록 맞췄어요.
+운영 환경에서 다국어 사용자 입력을 본격적으로 지원한다면 영어 description이나 한영 병기 description을 검토할 수 있지만, 이번 과제 범위에서는 한국어 description이 의도와 테스트 문맥에 가장 직접적이라고 판단했어요.
+
+`OrderTools`는 현재 하나의 클래스로 묶었어요.
+이번 단계의 Tool 3개는 모두 Mock 주문 aggregate 하나를 기준으로 조회하거나 상태를 바꾸는 작은 기능이고, 공통으로 `OrderMockService`와 view 변환기를 사용해요.
+지금 분리하면 클래스 수만 늘고 Tool 목록을 한눈에 보기 어려워져서 하나로 충분하다고 봤어요.
+다만 기능이 늘어난다면 `OrderQueryTools`와 `OrderCommandTools`처럼 조회와 변경을 나누거나, 결제/환불 Tool이 생기면 `PaymentTools`로 분리하는 기준이 적절해요.
+
 ## 테스트 코드
 
 기본 검증은 실제 Ollama를 호출하지 않는 단위/웹 계층 테스트로 작성했어요.
@@ -551,3 +601,12 @@ AI가 환불 가능 여부를 직접 추측하지 않고, 주문 상태 조회 t
 - [x] 개인정보 요청 케이스 테스트 코드 작성
 - [x] AI 코드 리뷰 기록
 - [x] 민감 정보 커밋 없음
+
+### Tool Calling 자가 점검
+
+- [x] `./gradlew bootRun`으로 프로젝트가 정상 실행되는가?
+- [ ] 시나리오 5종의 응답 본문이 모두 README에 있는가?
+- [ ] 콘솔 로그의 `[Tool] getXxx(orderId=...)` 라인을 각 시나리오마다 캡처했는가?
+- [x] Mock 주문 4건이 실제로 `seed()`에 추가되었는가? (`OrderMockService seeded — 6건` 로그로 확인)
+- [x] `2024-1238` 주문에 `order.cancel("고객 요청", ...)` 호출이 포함되어 `canceledReason`이 채워져 있는가?
+- [x] 설계 결정 3개 질문에 대한 "왜?" 답이 README에 있는가?
