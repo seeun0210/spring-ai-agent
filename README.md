@@ -29,6 +29,7 @@ POST /api/v1/assistant
 - `OrderCancelService`로 취소 흐름 분리
 - `CancelHistoryService`로 첫 취소 `cancelId` 기록 및 재취소 멱등 응답 재전달
 - `ToolLoggingAspect`로 `@Tool` 호출 로그를 AOP에서 공통 기록
+- `getDeliveryStatus` description A/B/C 실험으로 Tool 호출률 비교
 
 Mock 주문 seed 확인:
 
@@ -420,6 +421,124 @@ curl -s -X POST http://localhost:18094/api/v1/assistant \
 4. 취소 사유와 취소 시각이 덮어써져 감사 로그와 고객 분쟁 대응 근거가 훼손될 수 있어요.
 5. 취소 히스토리 테이블에 서로 다른 `cancelId`가 두 개 생기면 정산/CS/알림 시스템이 서로 다른 취소 건으로 오인할 수 있어요.
 
+## 3단계: Tool description 실험
+
+같은 질문을 두고 `getDeliveryStatus`의 `description`만 바꿔서 각 버전마다 5회씩 호출했어요.
+각 실험 후 코드는 다시 정상 description으로 복원했어요.
+
+공통 요청:
+
+```bash
+curl -s -X POST http://localhost:18095/api/v1/assistant \
+  -H "Content-Type: application/json" \
+  -d '{"message":"주문번호 2024-1234 배달 어디쯤이에요?"}'
+```
+
+### Description 버전
+
+| 버전 | description 전문 |
+| --- | --- |
+| A (기준) | `주문번호로 배달 상태와 라이더 위치를 조회합니다.` |
+| B (빈약) | `배달 정보 조회` |
+| C (오해 유발) | `주문번호 조회용. 메뉴와 결제 금액만 반환한다.` |
+
+### 정량 비교
+
+| 버전 | Tool 호출 횟수 (5회 중) | 응답에 "역삼역 사거리" 포함 횟수 | 비고 |
+| --- | ---: | ---: | --- |
+| A | 5/5 `getDeliveryStatus` | 5/5 | 정상 description. 항상 배달 Tool을 호출하고 라이더 위치를 답함 |
+| B | 5/5 `getDeliveryStatus` | 5/5 | 빈약하지만 "배달" 키워드와 Tool 이름 덕분에 이번 모델에서는 호출률이 유지됨 |
+| C | 2/5 `getDeliveryStatus`, 3/5 `getOrderDetail` | 2/5 | description이 메뉴/결제용이라고 오해시켜 3회 잘못된 Tool을 호출함 |
+
+### 로그와 응답 관찰
+
+A 버전 로그:
+
+```text
+[Tool] getDeliveryStatus(orderId=2024-1234)
+[Tool] getDeliveryStatus(orderId=2024-1234)
+[Tool] getDeliveryStatus(orderId=2024-1234)
+[Tool] getDeliveryStatus(orderId=2024-1234)
+[Tool] getDeliveryStatus(orderId=2024-1234)
+```
+
+B 버전 로그:
+
+```text
+[Tool] getDeliveryStatus(orderId=2024-1234)
+[Tool] getDeliveryStatus(orderId=2024-1234)
+[Tool] getDeliveryStatus(orderId=2024-1234)
+[Tool] getDeliveryStatus(orderId=2024-1234)
+[Tool] getDeliveryStatus(orderId=2024-1234)
+```
+
+C 버전 로그:
+
+```text
+[Tool] getOrderDetail(orderId=2024-1234)
+[Tool] getOrderDetail(orderId=2024-1234)
+[Tool] getOrderDetail(orderId=2024-1234)
+[Tool] getDeliveryStatus(orderId=2024-1234)
+[Tool] getDeliveryStatus(orderId=2024-1234)
+```
+
+C 버전 대표 응답:
+
+```text
+주문번호 2024-1234는 현재 배달 중이에요.
+라이더가 음식을 준비하고 있는 상태입니다.
+추가로 궁금한 사항이 있으면 알려주세요.
+```
+
+```text
+주문번호 2024-1234는 현재 배달 중입니다.
+라이더가 음식을 배달 중이므로, 추가 정보가 필요하지 않습니다.
+다음에 도움이 필요하면 알려주세요.
+```
+
+```text
+핵심 답변: 주문번호 2024-1234는 현재 배달 중입니다.
+라이더의 정확한 위치는 시스템에서 제공되지 않아요.
+앱에서 실시간으로 주문 상태를 확인해 주세요.
+```
+
+C 버전에서는 `getDeliveryStatus`가 실제로 라이더 위치를 반환할 수 있는데도, description이 "메뉴와 결제 금액만 반환한다"고 적혀 있어서 모델이 `getOrderDetail`을 먼저 선택했어요.
+`getOrderDetail`에는 주문 상태 `DELIVERING`은 있지만 `riderLocation`이 없기 때문에, 응답은 "음식을 준비하고 있는 상태"처럼 근거가 약한 문장을 만들거나 정확한 위치를 제공할 수 없다고 회피했어요.
+이번 실험에서는 순수한 무근거 지명 hallucination보다, 잘못된 Tool 선택과 부분 정보 기반의 추측성 답변이 더 크게 나타났어요.
+
+### Spring AI 구현체 확인
+
+Spring AI 1.0.0 소스를 확인해 보니 `description`은 단순 주석이 아니라 모델 요청에 들어가는 실제 Tool metadata였어요.
+
+흐름은 다음과 같아요.
+
+1. `ChatClient.Builder.defaultTools(orderTools)`는 내부적으로 `ToolCallbacks.from(toolObjects)`를 호출해요.
+2. `ToolCallbacks.from(...)`는 `MethodToolCallbackProvider`로 `@Tool`이 붙은 메서드를 찾고 `MethodToolCallback`을 만들어요.
+3. `ToolDefinitions.from(method)`가 `ToolUtils.getToolDescription(method)`를 호출해 `@Tool.description` 값을 `ToolDefinition.description`에 넣어요.
+4. `OllamaChatModel`은 `ToolDefinition.name`, `ToolDefinition.description`, `ToolDefinition.inputSchema`를 `OllamaApi.ChatRequest.Tool.Function`으로 변환해 요청의 `tools`에 실어요.
+
+확인한 핵심 구현:
+
+```java
+// ToolDefinitions.builder(method)
+return DefaultToolDefinition.builder()
+    .name(ToolUtils.getToolName(method))
+    .description(ToolUtils.getToolDescription(method))
+    .inputSchema(JsonSchemaGenerator.generateForMethodInput(method));
+```
+
+```java
+// OllamaChatModel
+new OllamaApi.ChatRequest.Tool.Function(
+    toolDefinition.name(),
+    toolDefinition.description(),
+    toolDefinition.inputSchema()
+);
+```
+
+즉 모델 입장에서는 `description`이 실제 API 문서예요.
+C 버전에서 `getDeliveryStatus`가 "메뉴와 결제 금액만 반환한다"고 설명되자, 모델은 메서드 구현을 알 수 없고 이 문서를 믿고 `getOrderDetail`을 선택한 것으로 볼 수 있어요.
+
 ## 설계 결정
 
 ### OrderDetailView 필드 제한
@@ -434,6 +553,30 @@ Tool별 view를 분리하면 LLM이 필요 이상의 정보를 근거로 답변�
 `@Tool`과 `@ToolParam`의 `description`은 한국어로 작성했어요.
 현재 System Prompt와 사용자 입력, 응답 정책이 모두 한국어이고, 과제 시나리오도 한국어 주문 상담 문장이라 모델이 같은 언어권 표현으로 Tool의 용도를 이해하도록 맞췄어요.
 운영 환경에서 다국어 사용자 입력을 본격적으로 지원한다면 영어 description이나 한영 병기 description을 검토할 수 있지만, 이번 과제 범위에서는 한국어 description이 의도와 테스트 문맥에 가장 직접적이라고 판단했어요.
+
+### Tool description 필수 항목
+
+실험 후 description에는 다음 네 가지를 중요도 순서로 넣어야 한다고 봤어요.
+
+1. 호출해야 하는 사용자 의도
+   C 버전에서 실제 기능보다 "메뉴와 결제 금액"이라는 잘못된 설명이 Tool 선택을 바꿨어요. 모델은 메서드명만 보지 않고 description을 API 문서처럼 읽으므로, 어떤 질문에서 이 Tool을 써야 하는지가 가장 중요해요.
+2. 반환하는 핵심 정보
+   배달 상태와 라이더 위치처럼 답변에 직접 들어갈 값을 명시해야 해요. 이 정보가 빠지면 모델이 Tool 결과로 무엇을 답할 수 있는지 확신하지 못해 질문을 회피하거나 다른 Tool을 고를 수 있어요.
+3. 필요한 입력값
+   주문번호가 필요하다는 점을 Tool과 ToolParam에 같이 적어야 해요. 입력 조건이 분명하면 모델이 주문번호를 파라미터로 추출하기 쉽고, 주문번호가 없을 때 무리하게 호출하지 않아요.
+4. 실패했을 때의 의미
+   null이나 결과 없음은 "주문을 찾을 수 없음"으로 해석해야 해요. 실패 의미가 description에 없으면 모델이 시스템 오류, 배달 준비 중, 정보 없음 등을 섞어 안내할 가능성이 있어요.
+
+### 오래된 description 방지
+
+description은 코드 주석보다 위험해요.
+주석은 개발자만 읽지만 Tool description은 LLM이 실제 런타임 의사결정에 사용하는 API 문서이기 때문이에요.
+프로덕션에서는 다음 장치를 두는 것이 필요하다고 봤어요.
+
+- Tool의 반환 DTO나 동작을 바꾸는 PR에는 description 변경 여부를 리뷰 체크리스트로 확인해요.
+- 대표 사용자 문장별로 어떤 Tool이 호출되어야 하는지 contract test를 둬요.
+- `@Tool` description과 README/운영 문서의 예시 질문을 함께 관리해 오래된 설명을 줄여요.
+- 배포 전 smoke test에서 실제 LLM 호출 로그를 확인해 의도한 Tool 호출률이 유지되는지 봐요.
 
 ### OrderTools 분리 기준
 
@@ -538,3 +681,10 @@ BUILD SUCCESSFUL
 - [x] 첫 취소 `cancelId`를 재취소 응답에서 재사용하고, 분기 제거 시 새 `cancelId`가 생기는 문제를 관찰했는가?
 - [x] 고객 오해 3가지 이상과 프로덕션 장애 3가지 이상을 작성했는가?
 - [x] Outcome enum 설계 근거와 신규 Outcome 2개 이상 아이디어를 작성했는가?
+
+### Tool description
+
+- [x] 세 버전의 description 전문이 README에 있는가?
+- [x] 각 버전별 Tool 호출 횟수와 응답의 "역삼역 사거리" 포함 횟수가 수치 표로 기록되어 있는가?
+- [x] 버전 C에서 잘못된 Tool 호출과 추측성 답변이 구체적으로 기록되어 있는가?
+- [x] description 필수 항목 4가지와 오래된 description 방지 대책이 작성되어 있는가?
