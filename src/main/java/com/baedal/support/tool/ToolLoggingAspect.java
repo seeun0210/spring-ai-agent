@@ -10,11 +10,17 @@ import org.springframework.stereotype.Component;
 
 import java.lang.reflect.Method;
 import java.util.StringJoiner;
+import java.util.regex.Pattern;
 
 @Slf4j
 @Aspect
 @Component
 public class ToolLoggingAspect {
+
+    private static final int MAX_LOG_VALUE_LENGTH = 120;
+    private static final Pattern PHONE_PATTERN = Pattern.compile("\\b\\d{2,3}-\\d{3,4}-\\d{4}\\b");
+    private static final Pattern ACCOUNT_PATTERN = Pattern.compile("\\b\\d{2,6}-\\d{2,6}-\\d{2,8}\\b");
+    private static final Pattern ADDRESS_PATTERN = Pattern.compile("(서울시|서울|경기도|부산시|대구시|인천시|광주시|대전시|울산시|세종시)[^\\n\",]{0,40}(로|길)\\s*\\d+");
 
     @Around("@annotation(org.springframework.ai.tool.annotation.Tool)")
     public Object logToolCall(ProceedingJoinPoint joinPoint) throws Throwable {
@@ -33,7 +39,7 @@ public class ToolLoggingAspect {
         StringJoiner joiner = new StringJoiner(", ");
 
         for (int i = 0; i < args.length; i++) {
-            joiner.add(parameterNames[i] + "=" + args[i]);
+            joiner.add(parameterNames[i] + "=" + safeValue(args[i]));
         }
 
         return joiner.toString();
@@ -64,7 +70,7 @@ public class ToolLoggingAspect {
                     cancelResult.cancelId(),
                     cancelResult.outcome(),
                     cancelResult.status(),
-                    cancelResult.canceledReason(),
+                    safeValue(cancelResult.canceledReason()),
                     cancelResult.canceledAt()
             );
             return;
@@ -72,6 +78,40 @@ public class ToolLoggingAspect {
 
         if (result == null) {
             log.info("[Tool] {} result(null)", methodName);
+            return;
         }
+
+        log.info(
+                "[Tool] {} result(type={}, id={}, summary={})",
+                methodName,
+                result.getClass().getSimpleName(),
+                extractId(result),
+                safeValue(result)
+        );
+    }
+
+    private String extractId(Object result) {
+        try {
+            Method orderId = result.getClass().getMethod("orderId");
+            Object id = orderId.invoke(result);
+            return safeValue(id);
+        } catch (ReflectiveOperationException ignored) {
+            return "n/a";
+        }
+    }
+
+    private String safeValue(Object value) {
+        if (value == null) {
+            return "null";
+        }
+
+        String sanitized = String.valueOf(value);
+        sanitized = PHONE_PATTERN.matcher(sanitized).replaceAll("[PHONE]");
+        sanitized = ACCOUNT_PATTERN.matcher(sanitized).replaceAll("[ACCOUNT]");
+        sanitized = ADDRESS_PATTERN.matcher(sanitized).replaceAll("[ADDRESS]");
+        if (sanitized.length() > MAX_LOG_VALUE_LENGTH) {
+            return sanitized.substring(0, MAX_LOG_VALUE_LENGTH) + "...[TRUNCATED]";
+        }
+        return sanitized;
     }
 }

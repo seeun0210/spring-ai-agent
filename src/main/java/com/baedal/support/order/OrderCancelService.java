@@ -19,16 +19,18 @@ public class OrderCancelService {
     }
 
     private CancelOrderResult cancelExistingOrder(Order order, String reason) {
-        OffsetDateTime requestedAt = OffsetDateTime.now();
-        CancelOrderOutcome outcome = order.cancelIfPossible(reason, requestedAt);
+        synchronized (order) {
+            OffsetDateTime requestedAt = OffsetDateTime.now();
+            CancelOrderOutcome outcome = order.cancelIfPossible(reason, requestedAt);
 
-        CancelHistory history = switch (outcome) {
-            case CANCELED -> cancelHistoryService.record(order, reason, outcome, requestedAt);
-            case ALREADY_CANCELED -> cancelHistoryService.findLatestCanceled(order.getOrderId(), order.getCustomerId())
-                    .orElse(null);
-            case NOT_CANCELABLE, NOT_FOUND -> null;
-        };
+            CancelHistory history = switch (outcome) {
+                case CANCELED -> cancelHistoryService.record(order, reason, outcome, requestedAt);
+                case ALREADY_CANCELED -> cancelHistoryService.findLatestCanceled(order.getOrderId(), order.getCustomerId())
+                        .orElse(null);
+                case NOT_CANCELABLE, NOT_FOUND -> null;
+            };
 
-        return CancelOrderResult.from(order, outcome, history);
+            return CancelOrderResult.from(order, outcome, history);
+        }
     }
 }

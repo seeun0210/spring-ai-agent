@@ -82,7 +82,7 @@ public class OrderMockService {
                 null,
                 baseTime.minusMinutes(30)
         );
-        canceledOrder.cancel("고객 요청", baseTime.minusMinutes(25));
+        canceledOrder.cancelIfPossible("고객 요청", baseTime.minusMinutes(25));
         put(canceledOrder);
 
         put(new Order(

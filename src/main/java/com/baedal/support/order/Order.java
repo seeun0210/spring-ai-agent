@@ -2,6 +2,7 @@ package com.baedal.support.order;
 
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Objects;
 
 public class Order {
 
@@ -81,7 +82,9 @@ public class Order {
                 || status == OrderStatus.COOKING;
     }
 
-    public CancelOrderOutcome cancelIfPossible(String reason, OffsetDateTime canceledAt) {
+    public synchronized CancelOrderOutcome cancelIfPossible(String reason, OffsetDateTime canceledAt) {
+        Objects.requireNonNull(canceledAt, "canceledAt must not be null");
+
         if (status == OrderStatus.CANCELED) {
             return CancelOrderOutcome.ALREADY_CANCELED;
         }
@@ -95,16 +98,16 @@ public class Order {
     }
 
     private String normalizeCancelReason(String reason) {
-        return reason == null || reason.isBlank() ? "고객 요청" : reason;
+        return reason == null || reason.isBlank() ? "고객 요청" : reason.trim();
     }
 
     public void updateRiderLocation(String riderLocation) {
         this.riderLocation = riderLocation;
     }
 
-    public void cancel(String reason, OffsetDateTime canceledAt) {
+    private void cancel(String reason, OffsetDateTime canceledAt) {
         this.status = OrderStatus.CANCELED;
-        this.canceledReason = reason;
+        this.canceledReason = normalizeCancelReason(reason);
         this.canceledAt = canceledAt;
     }
 }

@@ -52,6 +52,10 @@ public class OrderTools {
             @ToolParam(description = "취소할 주문번호") String orderId,
             @ToolParam(description = "고객이 말한 취소 사유") String reason
     ) {
-        return orderCancelService.cancel(orderId, currentCustomerProvider.currentCustomerId(), reason);
+        return orderCancelService.cancel(orderId, currentCustomerProvider.currentCustomerId(), normalizeReason(reason));
+    }
+
+    private String normalizeReason(String reason) {
+        return reason == null || reason.isBlank() ? "고객 요청" : reason.trim();
     }
 }

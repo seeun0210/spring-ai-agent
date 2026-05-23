@@ -24,6 +24,16 @@
         <appender-ref ref="LLM_PERFORMANCE_FILE"/>
     </logger>
 
+    <logger name="com.baedal.support.advisor.ObservedToolCallingManager" level="INFO" additivity="false">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="LLM_PERFORMANCE_FILE"/>
+    </logger>
+
+    <logger name="com.baedal.support.tool.ToolLoggingAspect" level="INFO" additivity="false">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="LLM_PERFORMANCE_FILE"/>
+    </logger>
+
     <root level="INFO">
         <appender-ref ref="CONSOLE"/>
     </root>

@@ -22,7 +22,13 @@ public class ObservedToolCallingManager implements ToolCallingManager {
         List<ToolDefinition> toolDefinitions = delegate.resolveToolDefinitions(chatOptions);
 
         log.info(
-                "LLM tool definitions resolved. toolCount={}\n{}",
+                "LLM tool definitions resolved. toolCount={}, tools={}",
+                toolDefinitions.size(),
+                PromptLogFormatter.summarizeToolDefinitions(toolDefinitions)
+        );
+
+        log.debug(
+                "LLM tool definitions detail. toolCount={}\n{}",
                 toolDefinitions.size(),
                 PromptLogFormatter.formatToolDefinitions(toolDefinitions)
         );
@@ -35,9 +41,15 @@ public class ObservedToolCallingManager implements ToolCallingManager {
         ToolExecutionResult result = delegate.executeToolCalls(prompt, chatResponse);
 
         log.info(
-                "LLM tool response prompt prepared. messageCount={}\n{}",
+                "LLM tool response prompt prepared. messageCount={}, messages={}",
                 result.conversationHistory().size(),
-                PromptLogFormatter.formatMessages(result.conversationHistory())
+                PromptLogFormatter.summarizeMessages(result.conversationHistory())
+        );
+
+        log.debug(
+                "LLM tool response prompt detail. messageCount={}\n{}",
+                result.conversationHistory().size(),
+                PromptLogFormatter.formatMaskedMessages(result.conversationHistory())
         );
 
         return result;

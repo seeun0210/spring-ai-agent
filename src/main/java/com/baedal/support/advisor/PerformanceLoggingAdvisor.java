@@ -121,11 +121,18 @@ public class PerformanceLoggingAdvisor implements CallAdvisor, StreamAdvisor {
         List<ToolDefinition> toolDefinitions = toolDefinitionsOf(request);
 
         log.info(
-                "LLM request prompt. endpoint={}, messageCount={}, toolCount={}\nmessages:\n{}\ntools:\n{}",
+                "LLM request prompt. endpoint={}, messageCount={}, toolCount={}, messages={}, tools={}",
                 endpoint,
                 request.prompt().getInstructions().size(),
                 toolDefinitions.size(),
-                PromptLogFormatter.formatMessages(request.prompt().getInstructions()),
+                PromptLogFormatter.summarizeMessages(request.prompt().getInstructions()),
+                PromptLogFormatter.summarizeToolDefinitions(toolDefinitions)
+        );
+
+        log.debug(
+                "LLM request prompt detail. endpoint={}\nmessages:\n{}\ntools:\n{}",
+                endpoint,
+                PromptLogFormatter.formatMaskedMessages(request.prompt().getInstructions()),
                 PromptLogFormatter.formatToolDefinitions(toolDefinitions)
         );
     }

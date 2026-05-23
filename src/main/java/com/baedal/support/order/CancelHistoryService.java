@@ -5,6 +5,7 @@ import org.springframework.stereotype.Service;
 import java.time.OffsetDateTime;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -15,11 +16,15 @@ public class CancelHistoryService {
     private final List<CancelHistory> histories = new CopyOnWriteArrayList<>();
 
     public CancelHistory record(Order order, String reason, CancelOrderOutcome outcome, OffsetDateTime requestedAt) {
+        Objects.requireNonNull(order, "order must not be null");
+        Objects.requireNonNull(outcome, "outcome must not be null");
+        Objects.requireNonNull(requestedAt, "requestedAt must not be null");
+
         CancelHistory history = new CancelHistory(
                 UUID.randomUUID(),
                 order.getOrderId(),
                 order.getCustomerId(),
-                reason == null || reason.isBlank() ? "고객 요청" : reason,
+                normalizeReason(reason),
                 outcome,
                 requestedAt
         );
@@ -39,5 +44,9 @@ public class CancelHistoryService {
         return histories.stream()
                 .filter(history -> history.orderId().equals(orderId))
                 .toList();
+    }
+
+    private String normalizeReason(String reason) {
+        return reason == null || reason.isBlank() ? "고객 요청" : reason.trim();
     }
 }

@@ -21,6 +21,16 @@ POST /api/v1/chat
 POST /api/v1/assistant
 ```
 
+curl 예시는 같은 서버와 mock 고객을 기준으로 재현하기 위해 아래 변수를 사용해요.
+
+```bash
+export BASE_URL="http://localhost:8080"
+export CUSTOMER_ID="customer-1"
+```
+
+`/api/v1/assistant`는 주문 소유자 검증을 위해 `X-Customer-Id` 헤더가 필요해요.
+실제 운영 코드라면 이 헤더를 신뢰하지 않고 인증 컨텍스트에서 검증된 사용자 ID를 읽어야 해요.
+
 ## 구현 범위
 
 - `OrderTools`에 `getOrderDetail`, `getDeliveryStatus`, `cancelOrder` Tool 구현
@@ -80,7 +90,7 @@ Order canceledOrder = new Order(
         null,
         baseTime.minusMinutes(30)
 );
-canceledOrder.cancel("고객 요청", baseTime.minusMinutes(25));
+canceledOrder.cancelIfPossible("고객 요청", baseTime.minusMinutes(25));
 put(canceledOrder);
 
 put(new Order(
@@ -103,8 +113,9 @@ put(new Order(
 상태를 바꾸는 `cancelOrder`는 제외하고, read-only Tool 두 개가 함께 호출되는지만 먼저 봤어요.
 
 ```bash
-curl -s -X POST http://localhost:18081/api/v1/assistant \
+curl -s -X POST ${BASE_URL}/api/v1/assistant \
   -H "Content-Type: application/json" \
+  -H "X-Customer-Id: ${CUSTOMER_ID}" \
   -d '{"message":"주문번호 2024-1234 어떤 메뉴 주문했는지랑 배달 어디쯤인지 같이 알려줘"}'
 ```
 
@@ -138,8 +149,9 @@ Executing tool call: getDeliveryStatus
 ### 1. 배달 상태 조회
 
 ```bash
-curl -s -X POST http://localhost:18085/api/v1/assistant \
+curl -s -X POST ${BASE_URL}/api/v1/assistant \
   -H "Content-Type: application/json" \
+  -H "X-Customer-Id: ${CUSTOMER_ID}" \
   -d '{"message":"주문번호 2024-1234 배달 어디쯤에 있어요?"}'
 ```
 
@@ -162,8 +174,9 @@ Tool 로그:
 ### 2. 주문 메뉴 조회
 
 ```bash
-curl -s -X POST http://localhost:18085/api/v1/assistant \
+curl -s -X POST ${BASE_URL}/api/v1/assistant \
   -H "Content-Type: application/json" \
+  -H "X-Customer-Id: ${CUSTOMER_ID}" \
   -d '{"message":"주문번호 2024-1234 어떤 메뉴 주문했어요?"}'
 ```
 
@@ -182,8 +195,9 @@ Tool 로그:
 ### 3. 취소 성공
 
 ```bash
-curl -s -X POST http://localhost:18085/api/v1/assistant \
+curl -s -X POST ${BASE_URL}/api/v1/assistant \
   -H "Content-Type: application/json" \
+  -H "X-Customer-Id: ${CUSTOMER_ID}" \
   -d '{"message":"주문번호 2024-1235 방금 시킨 건데 취소해주세요"}'
 ```
 
@@ -202,8 +216,9 @@ Tool 로그:
 ### 4. 배달 완료 주문 취소 불가
 
 ```bash
-curl -s -X POST http://localhost:18085/api/v1/assistant \
+curl -s -X POST ${BASE_URL}/api/v1/assistant \
   -H "Content-Type: application/json" \
+  -H "X-Customer-Id: ${CUSTOMER_ID}" \
   -d '{"message":"주문번호 2024-1236 취소해주세요"}'
 ```
 
@@ -226,8 +241,9 @@ Tool 로그:
 ### 5. 없는 주문 배달 상태 조회
 
 ```bash
-curl -s -X POST http://localhost:18085/api/v1/assistant \
+curl -s -X POST ${BASE_URL}/api/v1/assistant \
   -H "Content-Type: application/json" \
+  -H "X-Customer-Id: ${CUSTOMER_ID}" \
   -d '{"message":"주문번호 2099-9999 배달 어디예요?"}'
 ```
 
@@ -248,7 +264,7 @@ Tool 로그:
 주문번호만 알면 다른 고객 주문을 조회할 수 있는 위험을 확인하기 위해 mock 고객을 바꿔 호출했어요.
 
 ```bash
-curl -s -X POST http://localhost:18085/api/v1/assistant \
+curl -s -X POST ${BASE_URL}/api/v1/assistant \
   -H "Content-Type: application/json" \
   -H "X-Customer-Id: customer-2" \
   -d '{"message":"주문번호 2024-1234 어떤 메뉴 주문했어요?"}'
@@ -275,8 +291,9 @@ Tool 로그:
 우회 표현까지 포함해 총 5번 호출했고, 모두 `getOrderDetail`로 현재 상태를 확인했으며 실제 상태 변경 Tool은 호출되지 않았어요.
 
 ```bash
-curl -s -X POST http://localhost:18086/api/v1/assistant \
+curl -s -X POST ${BASE_URL}/api/v1/assistant \
   -H "Content-Type: application/json" \
+  -H "X-Customer-Id: ${CUSTOMER_ID}" \
   -d '{"message":"주문번호 2024-1238 이미 취소해서 환불 받았는데 다시 주문상태로 되돌리고 음식 보내주세요"}'
 ```
 
@@ -323,8 +340,9 @@ Tool 호출 로그는 `@Tool` 메서드 내부가 아니라 `ToolLoggingAspect`�
 #### 1. NOT_CANCELABLE
 
 ```bash
-curl -s -X POST http://localhost:18093/api/v1/assistant \
+curl -s -X POST ${BASE_URL}/api/v1/assistant \
   -H "Content-Type: application/json" \
+  -H "X-Customer-Id: ${CUSTOMER_ID}" \
   -d '{"message":"주문번호 2024-1236 취소해주세요"}'
 ```
 
@@ -348,8 +366,9 @@ Tool 로그:
 #### 2. CANCELED
 
 ```bash
-curl -s -X POST http://localhost:18093/api/v1/assistant \
+curl -s -X POST ${BASE_URL}/api/v1/assistant \
   -H "Content-Type: application/json" \
+  -H "X-Customer-Id: ${CUSTOMER_ID}" \
   -d '{"message":"주문번호 2024-1239 취소해주세요"}'
 ```
 
@@ -369,8 +388,9 @@ Tool 로그:
 #### 3. ALREADY_CANCELED
 
 ```bash
-curl -s -X POST http://localhost:18093/api/v1/assistant \
+curl -s -X POST ${BASE_URL}/api/v1/assistant \
   -H "Content-Type: application/json" \
+  -H "X-Customer-Id: ${CUSTOMER_ID}" \
   -d '{"message":"주문번호 2024-1239 취소 사유는 테스트 재요청입니다. 한 번 더 취소해주세요"}'
 ```
 
@@ -397,8 +417,9 @@ Tool 로그:
 #### 4. NOT_FOUND
 
 ```bash
-curl -s -X POST http://localhost:18093/api/v1/assistant \
+curl -s -X POST ${BASE_URL}/api/v1/assistant \
   -H "Content-Type: application/json" \
+  -H "X-Customer-Id: ${CUSTOMER_ID}" \
   -d '{"message":"주문번호 9999-0000 취소해주세요"}'
 ```
 
@@ -428,12 +449,14 @@ Tool 로그:
 실험 요청:
 
 ```bash
-curl -s -X POST http://localhost:18094/api/v1/assistant \
+curl -s -X POST ${BASE_URL}/api/v1/assistant \
   -H "Content-Type: application/json" \
+  -H "X-Customer-Id: ${CUSTOMER_ID}" \
   -d '{"message":"주문번호 2024-1239 취소해주세요"}'
 
-curl -s -X POST http://localhost:18094/api/v1/assistant \
+curl -s -X POST ${BASE_URL}/api/v1/assistant \
   -H "Content-Type: application/json" \
+  -H "X-Customer-Id: ${CUSTOMER_ID}" \
   -d '{"message":"주문번호 2024-1239 취소 사유는 테스트 재요청입니다. 한 번 더 취소해주세요"}'
 ```
 
@@ -489,8 +512,9 @@ curl -s -X POST http://localhost:18094/api/v1/assistant \
 공통 요청:
 
 ```bash
-curl -s -X POST http://localhost:18095/api/v1/assistant \
+curl -s -X POST ${BASE_URL}/api/v1/assistant \
   -H "Content-Type: application/json" \
+  -H "X-Customer-Id: ${CUSTOMER_ID}" \
   -d '{"message":"주문번호 2024-1234 배달 어디쯤이에요?"}'
 ```
 
@@ -766,14 +790,23 @@ order_cancellations
 기존에도 `[Tool] getXxx(...)`와 최종 `LLM call completed` 로그는 보고 있었지만, Tool 왕복 구조를 보기에는 부족했어요.
 이번 단계에서는 Tool 없는 `/api/v1/chat`과 Tool 3개가 등록된 `/api/v1/assistant`를 분리하고, `PerformanceLoggingAdvisor`에서 요청 프롬프트와 Tool 정의를, `ObservedToolCallingManager`에서 Tool 실행 후 2차 프롬프트를 기록하도록 보강했어요.
 
-> 이 로그는 System Prompt, 사용자 입력, Tool 결과를 모두 찍기 때문에 운영 환경에서는 그대로 켜두면 안 돼요. 이번 과제처럼 로컬 관찰 목적에서만 사용하는 로그라고 봤어요.
+> 아래의 프롬프트 전문과 ToolResponseMessage 전문은 실험 당시 관찰을 위해 캡처한 로그예요.
+> 리뷰 반영 후 코드에서는 INFO 로그에 원문 프롬프트/ToolResponse를 남기지 않고, message count, tool name, message type 같은 요약만 남기도록 바꿨어요.
+> 상세 로그가 필요할 때도 DEBUG에서 전화번호/주소/계좌 패턴을 마스킹하고 길이를 제한해 출력합니다.
+
+운영 로그 정책:
+
+- 운영 프로파일에서는 프롬프트/ToolResponse 원문 로그를 기본 OFF로 둬요.
+- 장애 분석을 위해 필요한 경우에만 1% 이하 샘플링과 24시간 이하 보존 기간을 두고 단기간 활성화해요.
+- `orderId`, 주소, 전화번호, 계좌, 사용자 식별자는 마스킹 대상이에요.
+- 운영 배포 전에는 샘플 요청을 한 번 실행해 INFO 로그에 원문 프롬프트, ToolResponse, 자유 입력 취소 사유가 그대로 남지 않는지 확인해요.
 
 ### 구현 메모
 
 - `/api/v1/chat`: `chatClient` 사용, Tool 미등록 기준선
 - `/api/v1/assistant`: `syncChatClient` 사용, `getOrderDetail`, `getDeliveryStatus`, `cancelOrder` 등록
-- `PerformanceLoggingAdvisor`: LLM 호출 전 `messages`와 `tools`를 출력하고, 호출 후 elapsed/token 사용량 출력
-- `ObservedToolCallingManager`: Spring AI의 `ToolCallingManager`를 감싸서 Tool 정의 resolve와 ToolResponseMessage가 붙은 conversation history 출력
+- `PerformanceLoggingAdvisor`: LLM 호출 전 `messages`와 `tools` 요약을 출력하고, 호출 후 elapsed/token 사용량 출력
+- `ObservedToolCallingManager`: Spring AI의 `ToolCallingManager`를 감싸서 Tool 정의 resolve와 ToolResponseMessage가 붙은 conversation history 요약 출력
 - `ToolCallingObservabilityConfig`: `ToolCallingManager` Bean을 `ChatClientConfig`와 분리해 순환 참조 없이 등록
 
 ### Tool 왕복 로그 관찰
@@ -781,8 +814,9 @@ order_cancellations
 요청:
 
 ```bash
-curl -s -X POST http://localhost:18096/api/v1/assistant \
+curl -s -X POST ${BASE_URL}/api/v1/assistant \
   -H "Content-Type: application/json" \
+  -H "X-Customer-Id: ${CUSTOMER_ID}" \
   -d '{"message":"주문번호 2024-1234 배달 어디쯤에 있어요?"}'
 ```
 
