@@ -40,6 +40,63 @@ Mock 주문 seed 확인:
 OrderMockService seeded — 6건
 ```
 
+Mock 데이터 4건 추가 코드:
+
+```java
+put(new Order(
+        "2024-1236",
+        "customer-1",
+        OrderStatus.DELIVERED,
+        List.of(
+                new OrderItem("김치찌개", 1, 11000),
+                new OrderItem("공기밥", 1, 1000)
+        ),
+        "서울시 서초구 서초대로 42",
+        null,
+        baseTime.minusHours(3)
+));
+put(new Order(
+        "2024-1237",
+        "customer-1",
+        OrderStatus.COOKING,
+        List.of(
+                new OrderItem("불고기버거", 2, 7000),
+                new OrderItem("감자튀김", 1, 3500)
+        ),
+        "서울시 강남구 선릉로 77",
+        null,
+        baseTime.minusMinutes(20)
+));
+
+Order canceledOrder = new Order(
+        "2024-1238",
+        "customer-1",
+        OrderStatus.ACCEPTED,
+        List.of(
+                new OrderItem("마라탕", 1, 15000),
+                new OrderItem("꿔바로우", 1, 12000)
+        ),
+        "서울시 송파구 올림픽로 1",
+        null,
+        baseTime.minusMinutes(30)
+);
+canceledOrder.cancel("고객 요청", baseTime.minusMinutes(25));
+put(canceledOrder);
+
+put(new Order(
+        "2024-1239",
+        "customer-1",
+        OrderStatus.ACCEPTED,
+        List.of(
+                new OrderItem("초밥 세트", 1, 18000),
+                new OrderItem("미소장국", 1, 1000)
+        ),
+        "서울시 마포구 양화로 55",
+        null,
+        baseTime.minusMinutes(10)
+));
+```
+
 ## Tool Calling 사전 실험
 
 하나의 요청 안에 메뉴 조회와 배달 상태 조회 의도를 함께 넣어 Tool 선택이 어떻게 되는지 확인했어요.
@@ -903,6 +960,153 @@ Tool 호출 시나리오는 Tool 없는 기준선 대비 입력 토큰이 `2369 
 단순히 Tool schema 3개가 추가되는 것에서 끝나지 않고, 1차 LLM이 Tool call을 선택한 뒤 `ToolResponseMessage`가 conversation history에 붙어서 2차 LLM 호출이 다시 일어나기 때문이에요.
 그래서 Tool Calling은 정확한 외부 상태를 가져오는 장점이 있지만, 호출이 필요한 질문에서는 프롬프트 왕복과 토큰 비용이 함께 늘어납니다.
 
+### AI 코드 리뷰
+
+다음 프롬프트로 AI에게 먼저 코드를 요청했다고 가정하고, 그 결과를 프로덕션 관점에서 리뷰했어요.
+
+```text
+"Spring AI 1.0으로 배달 주문 취소 Tool을 만들어줘. @Tool 어노테이션을 써야 해."
+```
+
+#### AI 생성 원본 코드
+
+```java
+@Component
+@RequiredArgsConstructor
+public class OrderCancelTool {
+
+    private final OrderRepository orderRepository;
+
+    @Tool(description = "Cancel delivery order")
+    public Order cancelOrder(@ToolParam(description = "order id") String orderId) {
+        Order order = orderRepository.findById(orderId)
+                .orElseThrow(() -> new IllegalArgumentException("Order not found"));
+
+        order.setStatus(OrderStatus.CANCELED);
+        order.setCanceledAt(LocalDateTime.now());
+
+        return orderRepository.save(order);
+    }
+}
+```
+
+이 코드는 데모 수준으로는 짧아 보이지만, 실제 배달 주문 취소 Tool로는 그대로 올리면 안 된다고 봤어요.
+
+#### 프로덕션 결함과 개선 방안
+
+| 결함 | 왜 위험한가 | 이번 수업 방식의 개선 |
+| --- | --- | --- |
+| 멱등성 없음 | 같은 주문을 두 번 취소하면 두 번째 요청도 다시 취소 성공처럼 처리될 수 있어요. 환불, 포인트, 알림이 연결되면 중복 처리 사고가 납니다. | `CANCELED / ALREADY_CANCELED / NOT_CANCELABLE / NOT_FOUND` Outcome을 나누고, 이미 취소된 주문은 첫 `cancelId`, `canceledReason`, `canceledAt`을 재전달해요. |
+| 예외를 그대로 throw | 주문이 없을 때 예외가 터지면 LLM은 정상적인 Tool 결과를 받지 못하고 fallback 안내도 어려워져요. | 없는 주문은 예외가 아니라 `CancelOrderResult.notFound(orderId)`를 반환해 LLM이 "주문을 찾을 수 없음"으로 답하게 해요. |
+| 내부 엔티티 그대로 반환 | `Order` 엔티티에는 주소, 고객 ID, 취소 사유, 내부 상태처럼 LLM에게 줄 필요 없는 정보가 섞일 수 있어요. 토큰도 낭비돼요. | Tool 응답은 `CancelOrderResult` 같은 전용 DTO로 제한하고, 메뉴 조회도 `OrderDetailView`처럼 필요한 필드만 노출해요. |
+| 권한 검증 없음 | 주문번호만 아는 사람이 다른 고객 주문을 취소할 수 있어요. | `CurrentCustomerProvider`에서 현재 고객 ID를 얻고 `findByIdForCustomer(orderId, customerId)`로 소유자 주문만 조회해요. |
+| description 부실 | "Cancel delivery order"만으로는 언제 호출해야 하는지, 재취소 요청은 어떻게 처리해야 하는지 모델이 알기 어려워요. | 한국어 description에 실행 의도, 기본 사유, 재취소 요청, 취소 가능 여부 질문과 실행 요청의 차이를 명시해요. |
+| 로깅 없음 | 누가 어떤 주문을 언제 취소 요청했는지 감사 추적이 어려워요. | `ToolLoggingAspect`에서 `[Tool] cancelOrder(orderId=..., reason=...)`와 outcome/result 로그를 공통 기록해요. |
+| Outcome 구분 없음 | 단순히 엔티티나 boolean만 반환하면 LLM이 취소 성공, 이미 취소, 취소 불가, 주문 없음의 차이를 안정적으로 설명하기 어려워요. | `CancelOrderOutcome` enum을 응답에 포함해 후속 자연어 응답과 운영 로그가 같은 기준을 보게 해요. |
+
+#### 본인 개선 코드
+
+```java
+@Component
+@RequiredArgsConstructor
+public class OrderTools {
+
+    private final OrderCancelService orderCancelService;
+    private final CurrentCustomerProvider currentCustomerProvider;
+
+    @Tool(
+            name = "cancelOrder",
+            description = """
+                    고객이 주문 취소 실행을 요청하면 주문번호와 취소 사유를 받아 주문을 취소하고 결과를 반환합니다.
+                    "취소해주세요", "취소해줘", "방금 시킨 건 취소"처럼 실행 의도가 명확하면 사유가 없어도 reason을 "고객 요청"으로 넣어 호출합니다.
+                    "한 번 더 취소해주세요", "다시 취소해주세요"처럼 재취소 요청이 포함되어도 이 Tool을 호출하여 ALREADY_CANCELED outcome을 확인합니다.
+                    배달 완료, 이미 취소, 존재하지 않는 주문을 포함한 모든 취소 실행 요청은 이 Tool을 호출하고 outcome으로 결과를 판단합니다.
+                    단순히 취소 가능 여부만 묻는 경우에는 이 Tool을 호출하지 않습니다.
+                    """
+    )
+    public CancelOrderResult cancelOrder(
+            @ToolParam(description = "취소할 주문번호") String orderId,
+            @ToolParam(description = "고객이 말한 취소 사유") String reason
+    ) {
+        return orderCancelService.cancel(orderId, currentCustomerProvider.currentCustomerId(), reason);
+    }
+}
+```
+
+```java
+@Service
+@RequiredArgsConstructor
+public class OrderCancelService {
+
+    private final OrderMockService orderMockService;
+    private final CancelHistoryService cancelHistoryService;
+
+    public CancelOrderResult cancel(String orderId, String customerId, String reason) {
+        return orderMockService.findByIdForCustomer(orderId, customerId)
+                .map(order -> cancelExistingOrder(order, reason))
+                .orElseGet(() -> CancelOrderResult.notFound(orderId));
+    }
+
+    private CancelOrderResult cancelExistingOrder(Order order, String reason) {
+        OffsetDateTime requestedAt = OffsetDateTime.now();
+        CancelOrderOutcome outcome = order.cancelIfPossible(reason, requestedAt);
+
+        CancelHistory history = switch (outcome) {
+            case CANCELED -> cancelHistoryService.record(order, reason, outcome, requestedAt);
+            case ALREADY_CANCELED -> cancelHistoryService.findLatestCanceled(order.getOrderId(), order.getCustomerId())
+                    .orElse(null);
+            case NOT_CANCELABLE, NOT_FOUND -> null;
+        };
+
+        return CancelOrderResult.from(order, outcome, history);
+    }
+}
+```
+
+```java
+public record CancelOrderResult(
+        String orderId,
+        String cancelId,
+        CancelOrderOutcome outcome,
+        OrderStatus status,
+        String message,
+        String canceledReason,
+        OffsetDateTime canceledAt
+) {
+
+    public static CancelOrderResult notFound(String orderId) {
+        return new CancelOrderResult(
+                orderId,
+                null,
+                CancelOrderOutcome.NOT_FOUND,
+                null,
+                "주문을 찾을 수 없습니다.",
+                null,
+                null
+        );
+    }
+}
+```
+
+로깅은 Tool 메서드 안에 직접 넣지 않고 AOP로 분리했어요.
+
+```java
+@Around("@annotation(org.springframework.ai.tool.annotation.Tool)")
+public Object logToolCall(ProceedingJoinPoint joinPoint) throws Throwable {
+    Method method = ((MethodSignature) joinPoint.getSignature()).getMethod();
+    String methodName = method.getName();
+
+    log.info("[Tool] {}({})", methodName, formatArguments(methodName, joinPoint.getArgs()));
+
+    Object result = joinPoint.proceed();
+    logResult(methodName, result);
+    return result;
+}
+```
+
+개선 결과, LLM은 예외나 내부 엔티티가 아니라 `outcome`, `status`, `message`, `cancelId`가 들어 있는 안정적인 Tool 결과를 받게 됐어요.
+그리고 중복 취소 요청도 새 취소 이벤트를 만들지 않고 `ALREADY_CANCELED`로 분기해 첫 취소 이력을 재전달할 수 있었어요.
+
 ## 테스트 코드
 
 기본 검증은 실제 Ollama를 호출하지 않는 단위/웹 계층 테스트로 작성했어요.
@@ -960,3 +1164,56 @@ BUILD SUCCESSFUL
 - [x] 최종 `LLM call completed`의 응답 시간과 입출력 토큰을 기록했는가?
 - [x] `/api/v1/chat`과 `/api/v1/assistant`의 같은 질문 입력 토큰 차이를 수치로 비교했는가?
 - [x] Tool 호출 시나리오가 Tool 없는 기준선 대비 몇 배의 입력 토큰을 쓰는지 기록했는가?
+
+## 학습 기록
+
+### 내가 배운 것
+
+Round 2에서 가장 크게 체감한 것은 Tool Calling이 "함수 하나 붙이면 모델이 알아서 잘 호출하는 기능"이 아니라, 모델에게 보여주는 API 계약을 설계하는 일이라는 점이에요.
+`getDeliveryStatus`의 description을 일부러 잘못 적었을 때 실제 구현은 그대로인데도 모델이 `getOrderDetail`을 대신 호출했고, 라이더 위치를 알 수 없다고 회피하거나 부분 정보로 추측하는 응답을 만들었어요.
+반대로 메뉴와 배달 위치를 함께 묻는 요청에서는 read-only Tool인 `getOrderDetail`, `getDeliveryStatus`를 한 요청 안에서 둘 다 호출했어요.
+이 실험을 통해 Tool 이름, description, input schema, System Prompt가 합쳐져 모델의 실행 계획이 되고, description은 개발자용 주석이 아니라 모델이 읽는 런타임 API 문서라는 것을 확인했어요.
+
+멱등성은 단순히 `status == CANCELED`를 체크하는 정도로 끝낼 문제가 아니라는 것도 직접 확인했어요.
+`ALREADY_CANCELED` 분기를 제거하자 두 번째 취소 요청이 다시 `CANCELED`로 흘러가면서 `canceledReason`, `canceledAt`이 덮어써지고 새로운 `cancelId`가 생겼어요.
+LLM 자연어 응답만 보면 "이미 취소되었습니다"처럼 멀쩡해 보일 수 있지만, 내부 outcome과 취소 히스토리는 실제로 한 번 더 취소된 것처럼 망가졌어요.
+그래서 취소 같은 command Tool은 주문 최종 상태뿐 아니라 첫 성공 이벤트를 식별할 `cancelId`와 취소 히스토리가 필요하고, 재요청에는 같은 결과를 다시 전달하는 방식이 고객 경험과 운영 로그 양쪽에서 더 안전하다고 판단했어요.
+
+판단과 실행을 분리하는 것도 중요했어요.
+고객이 취소 가능 여부만 물을 때는 취소 Tool을 실행하면 안 되고, "취소해주세요"처럼 실행 의도가 명확할 때만 `cancelOrder`가 호출되어야 해요.
+또 이미 취소/환불된 주문을 되돌려 음식 제공을 요구하는 악용 시나리오에서는 상태 변경 Tool이 아니라 조회 Tool로 현재 상태를 확인하고, 새 주문이나 상담원 확인으로 안내해야 했어요.
+여기에 주문번호만으로 조회하면 다른 사람 주문을 볼 수 있는 문제도 있어서, Tool 내부에서 현재 고객 소유 주문인지 확인하도록 막았어요.
+즉 AI Agent에서도 "모델이 잘 말하는가"보다 "어떤 Tool을 어떤 권한과 상태에서 실행해도 되는가"가 더 중요한 경계라고 느꼈어요.
+
+마지막으로 Observability를 붙여 보니 Tool Calling의 비용 구조가 눈에 보였어요.
+`/api/v1/assistant`는 Tool을 실제로 호출하지 않는 인사 요청에서도 Tool 3개의 schema 때문에 `/api/v1/chat`보다 입력 토큰이 늘었고, 배달 위치 조회처럼 Tool이 호출되는 경우에는 Tool call 이후 `ToolResponseMessage`가 붙은 2차 LLM 호출까지 발생했어요.
+정확한 상태를 가져오는 대신 프롬프트가 커지고 왕복이 늘어나므로, Tool을 많이 붙일수록 기능뿐 아니라 토큰 비용, 응답 시간, 로그 민감도까지 같이 설계해야 한다는 점을 배웠어요.
+
+### 의문점
+
+아직 궁금한 점은 여러 Tool이 한 번에 호출될 때의 실행 순서와 실패 처리예요.
+이번에는 `getOrderDetail`과 `getDeliveryStatus`처럼 조회 Tool 두 개가 순서대로 호출되어도 문제가 없었지만, 상태를 바꾸는 Tool이 여러 개 섞이면 순서가 비즈니스 결과를 바꿀 수 있어요.
+예를 들어 주문 취소와 포인트 환급, 라이더 배정 해제, 사장님 알림이 각각 Tool로 나뉜다면 LLM이 정한 순서대로 실행해도 되는지, 하나가 실패했을 때 트랜잭션처럼 롤백해야 하는지, 아니면 command Tool은 애초에 하나의 유스케이스로 묶어야 하는지 더 확인해 보고 싶어요.
+
+Tool 호출 테스트를 어디까지 자동화할 수 있는지도 의문이에요.
+description C 실험처럼 같은 질문에서도 모델이 어떤 Tool을 고르는지가 흔들릴 수 있어서, 일반 단위 테스트처럼 항상 같은 결과를 기대하기 어렵다고 느꼈어요.
+운영에서는 대표 질문별 Tool 선택률을 contract test나 smoke test로 관리해야 할 것 같은데, 어느 정도 실패율을 허용해야 하는지, 모델 변경이나 description 변경을 어떻게 감지해야 하는지는 아직 명확하지 않아요.
+
+보안과 관찰성 사이의 균형도 남은 질문이에요.
+이번에는 학습 목적으로 System Prompt, 사용자 입력, Tool schema, ToolResponseMessage를 모두 로그로 찍었지만 운영에서는 개인정보와 내부 정책이 그대로 노출될 수 있어요.
+어떤 필드는 마스킹해야 하고, 어떤 로그는 샘플링해야 하며, 장애 분석에 필요한 최소 정보가 무엇인지 더 설계가 필요해요.
+특히 현재 mock에서는 `X-Customer-Id`로 고객을 흉내 냈지만, 실제 서비스에서는 인증 컨텍스트와 세션, 주문 소유권 검증을 어디서 강제할지도 더 다뤄야 해요.
+
+### Round 3에 시도하고 싶은 것
+
+Round 3의 Chat Memory에서는 최근 대화의 주문번호와 마지막 Tool 결과를 안전하게 기억하는 실험을 해보고 싶어요.
+예를 들어 사용자가 먼저 "주문번호 2024-1234 배달 어디쯤이에요?"라고 물은 뒤 "그거 취소해주세요"라고 말하면, Memory에 최근 `orderId=2024-1234`와 마지막 intent가 남아 있어야 지시 대명사 "그거"를 해석할 수 있을 것 같아요.
+다만 Memory 값만 믿고 바로 취소를 실행하면 위험하므로, command Tool을 실행하기 전에는 기억한 주문번호를 다시 확인하거나 "2024-1234 주문을 취소할까요?" 같은 확인 단계를 넣는 방식이 필요해 보여요.
+
+Memory에는 전체 주문 상세나 개인정보를 넣기보다, 대화 해결에 필요한 최소 context만 넣고 싶어요.
+예를 들면 `recentOrderId`, `lastOrderStatus`, `lastToolOutcome`, `lastCancelId`, `pendingAction` 정도를 세션 단위로 저장하고, 주소나 결제 정보, 상세 취소 사유 같은 민감한 값은 Tool이 필요할 때 다시 조회하는 편이 안전해 보여요.
+또 주문 상태는 시간이 지나면 바뀌므로 Memory는 "힌트"로만 쓰고, 실제 실행이나 최종 답변 전에는 Tool로 최신 상태를 재조회하는 구조를 시도해 보고 싶어요.
+
+그리고 Round 2에서 만든 `cancelId`와 outcome을 Memory와 연결해 보고 싶어요.
+사용자가 "아까 취소한 거 다시 확인해줘"라고 하면 Memory의 `lastCancelId`로 같은 취소 결과를 설명하고, "한 번 더 취소해주세요"라고 하면 새 취소를 만들지 않고 기존 `ALREADY_CANCELED` 흐름을 자연스럽게 안내할 수 있을 것 같아요.
+결국 Round 3에서는 Memory가 편의성을 높이되, Tool 실행 권한과 최신 상태 검증을 흐리지 않도록 "기억은 문맥, 실행은 Tool, 최종 판단은 현재 상태"라는 구조로 가져가 보고 싶어요.
