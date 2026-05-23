@@ -667,6 +667,207 @@ curl -s -X POST http://localhost:18086/api/v1/assistant \
 3번 실험에서 상태 복구나 음식 제공 약속은 나오지 않았지만, 고객에게 가게 직접 연락을 안내하는 것은 운영 흐름을 벗어날 수 있다고 봤어요.
 그래서 System Prompt에 "취소 또는 환불 완료 주문에 대해 가게나 라이더에게 직접 연락하라고 안내하지 않는다"는 규칙을 추가했고, 같은 문장을 다시 실행해 새 주문 생성 안내로 바뀌는 것을 확인했어요.
 
+## 2단계: 멱등성 관찰
+
+`cancelOrder`의 4가지 Outcome을 `/api/v1/assistant`로 모두 실행했어요.
+Tool 호출 로그는 `@Tool` 메서드 내부가 아니라 `ToolLoggingAspect`에서 공통으로 남기도록 분리했어요.
+그래서 `OrderTools`는 Tool 진입점만 담당하고, 로그는 AOP에서 `[Tool] method(...)`와 `[Tool] cancelOrder result(...)` 형태로 기록돼요.
+
+취소는 주문 최종 상태만으로 판단하지 않고 `CancelHistory`를 별도로 남기도록 분리했어요.
+첫 취소가 성공하면 `cancelId`를 만들고, 같은 주문을 다시 취소하면 새 취소 기록을 만들지 않고 첫 `cancelId`, `canceledReason`, `canceledAt`을 다시 전달해요.
+현재는 과제용 in-memory mock이라 `CancelHistoryService`에 저장하지만, 운영 코드라면 `order_cancellations` 같은 별도 테이블로 두고 주문 상태와 취소 이벤트를 분리하는 편이 더 안전해요.
+`canceledAt`만 주문 row에 있으면 "언제 취소 상태가 되었는가"는 알 수 있지만, 어떤 취소 이벤트를 기준으로 멱등 응답을 재전달하는지 식별하기 어렵기 때문에 `cancelId`가 필요하다고 봤어요.
+
+### 정상 구현: Outcome 4가지
+
+#### 1. NOT_CANCELABLE
+
+```bash
+curl -s -X POST http://localhost:18093/api/v1/assistant \
+  -H "Content-Type: application/json" \
+  -d '{"message":"주문번호 2024-1236 취소해주세요"}'
+```
+
+LLM 응답:
+
+```text
+핵심 답변: 주문번호 2024-1236는 이미 배달 완료된 상태이므로 취소가 불가능합니다. 시스템 확인 결과 주문이 배달 중이 아닙니다. 추가 취소 요청은 처리할 수 없습니다.
+
+필요한 추가 정보: 없음
+
+다음 액션: 주문을 다시 진행하거나 고객센터에 문의해 주세요.
+```
+
+Tool 로그:
+
+```text
+[Tool] cancelOrder(orderId=2024-1236, reason=고객 요청)
+[Tool] cancelOrder result(orderId=2024-1236, cancelId=null, outcome=NOT_CANCELABLE, status=DELIVERED, canceledReason=null, canceledAt=null)
+```
+
+#### 2. CANCELED
+
+```bash
+curl -s -X POST http://localhost:18093/api/v1/assistant \
+  -H "Content-Type: application/json" \
+  -d '{"message":"주문번호 2024-1239 취소해주세요"}'
+```
+
+LLM 응답:
+
+```text
+주문 번호 2024-1239가 고객 요청으로 성공적으로 취소되었습니다. 취소 사유는 "고객 요청"이며, 주문이 완전히 취소되었습니다. 추가 문의사항이 있으시면 언제든지 도와드리겠습니다.
+```
+
+Tool 로그:
+
+```text
+[Tool] cancelOrder(orderId=2024-1239, reason=고객 요청)
+[Tool] cancelOrder result(orderId=2024-1239, cancelId=60218d00-ba68-444d-96f7-348681dbb355, outcome=CANCELED, status=CANCELED, canceledReason=고객 요청, canceledAt=2026-05-23T12:07:53.620132+09:00)
+```
+
+#### 3. ALREADY_CANCELED
+
+```bash
+curl -s -X POST http://localhost:18093/api/v1/assistant \
+  -H "Content-Type: application/json" \
+  -d '{"message":"주문번호 2024-1239 취소 사유는 테스트 재요청입니다. 한 번 더 취소해주세요"}'
+```
+
+LLM 응답:
+
+```text
+핵심 답변: 주문번호 2024-1239는 이미 취소된 상태입니다. 한 번 더 취소할 수 없습니다.
+
+추가 정보: 필요하지 않습니다.
+
+다음 액션: 재주문이 필요하시면 새 주문을 진행해 주세요.
+```
+
+Tool 로그:
+
+```text
+[Tool] cancelOrder(orderId=2024-1239, reason=테스트 재요청)
+[Tool] cancelOrder result(orderId=2024-1239, cancelId=60218d00-ba68-444d-96f7-348681dbb355, outcome=ALREADY_CANCELED, status=CANCELED, canceledReason=고객 요청, canceledAt=2026-05-23T12:07:53.620132+09:00)
+```
+
+첫 취소와 같은 `cancelId`, `canceledReason`, `canceledAt`이 유지됐어요.
+두 번째 요청은 상태 변경 없이 기존 취소 결과를 다시 알려주는 흐름으로 처리됐어요.
+
+#### 4. NOT_FOUND
+
+```bash
+curl -s -X POST http://localhost:18093/api/v1/assistant \
+  -H "Content-Type: application/json" \
+  -d '{"message":"주문번호 9999-0000 취소해주세요"}'
+```
+
+LLM 응답:
+
+```text
+핵심 답변: 주문번호 9999-0000은 시스템에서 찾을 수 없습니다. 주문번호가 정확한지 다시 확인해 주시기 바랍니다. 취소 처리는 정확한 주문번호를 확인한 후 진행됩니다.
+
+필요한 정보: 정확한 주문번호를 알려주세요.
+
+다음 행동: 정확한 주문번호를 입력하시면 즉시 취소 처리해 드리겠습니다.
+```
+
+Tool 로그:
+
+```text
+[Tool] cancelOrder(orderId=9999-0000, reason=고객 요청)
+[Tool] cancelOrder result(orderId=9999-0000, cancelId=null, outcome=NOT_FOUND, status=null, canceledReason=null, canceledAt=null)
+```
+
+### 실패 관찰: ALREADY_CANCELED 분기 제거
+
+실험용으로 `Order.cancelIfPossible(...)`에서 `status == CANCELED`일 때 `ALREADY_CANCELED`를 반환하는 분기를 제거했어요.
+그리고 이미 취소된 주문도 다시 `cancel(...)`까지 흘러가게 두었어요.
+이 변경은 실험 후 바로 복원했어요.
+
+실험 요청:
+
+```bash
+curl -s -X POST http://localhost:18094/api/v1/assistant \
+  -H "Content-Type: application/json" \
+  -d '{"message":"주문번호 2024-1239 취소해주세요"}'
+
+curl -s -X POST http://localhost:18094/api/v1/assistant \
+  -H "Content-Type: application/json" \
+  -d '{"message":"주문번호 2024-1239 취소 사유는 테스트 재요청입니다. 한 번 더 취소해주세요"}'
+```
+
+첫 번째 LLM 응답:
+
+```text
+주문번호 2024-1239가 고객 요청으로 성공적으로 취소되었습니다. 취소 사유는 '고객 요청'입니다. 추가 도움이 필요하시면 언제든지 알려주세요.
+```
+
+두 번째 LLM 응답:
+
+```text
+주문 2024-1239는 이미 취소되었습니다. 한 번 더 취소할 수 없습니다. 추가 도움이 필요하시면 알려주세요.
+```
+
+실패 로그:
+
+```text
+[Tool] cancelOrder(orderId=2024-1239, reason=고객 요청)
+[Tool] cancelOrder result(orderId=2024-1239, cancelId=5dc293ea-0b03-4e41-820b-75ec7bc5f9ef, outcome=CANCELED, status=CANCELED, canceledReason=고객 요청, canceledAt=2026-05-23T12:11:15.141957+09:00)
+
+[Tool] cancelOrder(orderId=2024-1239, reason=테스트 재요청)
+[Tool] cancelOrder result(orderId=2024-1239, cancelId=5c82631a-5c2a-41da-bf23-223340fd6328, outcome=CANCELED, status=CANCELED, canceledReason=테스트 재요청, canceledAt=2026-05-23T12:11:47.044189+09:00)
+```
+
+관찰 결과:
+
+- 코드는 두 번째 취소 요청도 `CANCELED`로 처리했어요. 이미 취소된 주문이지만 정상 취소처럼 다시 상태 전이를 수행한 셈이에요.
+- LLM 자연어 응답은 "이미 취소되었습니다"라고 말했지만, 내부 Tool outcome은 `CANCELED`였어요. 자연어 응답만 보면 문제가 작아 보이지만 시스템 로그는 상태 변경이 다시 일어난 것을 보여줘요.
+- `canceledReason`은 `고객 요청`에서 `테스트 재요청`으로 덮어써졌고, `canceledAt`도 첫 취소 시각에서 두 번째 취소 시각으로 바뀌었어요.
+- 취소 히스토리 관점에서도 첫 `cancelId`와 다른 두 번째 `cancelId`가 새로 생성됐어요. 즉, 같은 주문에 대해 실제 취소 이벤트가 두 번 생긴 것처럼 기록될 수 있어요.
+
+고객에게 줄 수 있는 오해:
+
+1. 같은 주문을 여러 번 취소할 수 있다고 오해할 수 있어요.
+2. 두 번째 취소 시각이 최신 취소 시각처럼 보이므로, 실제 첫 취소/환불 접수 시점이 흐려질 수 있어요.
+3. 취소 사유가 덮어써지면 고객이 처음 말한 취소 사유가 사라져, 상담원이 이력을 잘못 이해할 수 있어요.
+4. LLM은 "이미 취소"라고 말했지만 시스템 outcome은 `CANCELED`라서, 고객 화면/운영 로그/정산 시스템 사이 설명이 달라질 수 있어요.
+
+프로덕션에서 생길 수 있는 장애:
+
+1. 결제 취소 API나 환불 이벤트가 취소 성공 outcome에 묶여 있다면 결제 이중 취소 요청이 나갈 수 있어요.
+2. 포인트, 쿠폰, 크레딧 환급이 취소 성공 이벤트에 묶여 있다면 보상이 중복 지급될 수 있어요.
+3. 사장님 앱과 라이더 배정 시스템에 취소 알림이 두 번 발송되어 운영자가 중복 처리를 할 수 있어요.
+4. 취소 사유와 취소 시각이 덮어써져 감사 로그와 고객 분쟁 대응 근거가 훼손될 수 있어요.
+5. 취소 히스토리 테이블에 서로 다른 `cancelId`가 두 개 생기면 정산/CS/알림 시스템이 서로 다른 취소 건으로 오인할 수 있어요.
+
+### Outcome enum 설계 근거
+
+`CancelOrderOutcome`은 `CANCELED`, `ALREADY_CANCELED`, `NOT_CANCELABLE`, `NOT_FOUND` 4개로 유지했어요.
+현재 Mock 주문 취소 Tool에서 호출자가 구분해야 하는 결과는 "이번 요청으로 취소됨", "이미 취소돼서 상태 변경 없음", "주문은 있지만 상태상 취소 불가", "주문을 찾을 수 없음" 네 가지예요.
+이 네 값은 모두 고객 응답과 후속 처리 방식이 다르기 때문에 별도 Outcome으로 둬야 해요.
+
+`UNKNOWN`이나 `FAILED`는 넣지 않았어요.
+현재 구현은 외부 결제 API나 DB 트랜잭션 실패를 다루지 않는 in-memory Mock이고, 실패 원인을 모르는 상태가 발생하지 않아요.
+막연한 `FAILED`를 넣으면 LLM이 구체적인 안내를 하기 어렵고, 서버도 재시도/상담원 연결/취소 불가 중 어떤 처리를 해야 하는지 흐려져요.
+나중에 외부 시스템이 붙으면 `PAYMENT_CANCEL_FAILED`처럼 원인이 드러나는 Outcome을 추가하는 편이 더 낫다고 봤어요.
+
+실제 배달 운영에서 추가될 법한 Outcome:
+
+- `REQUIRES_AGENT`: 주문은 취소 가능해 보이지만 고액 주문, 반복 취소, 고객 분쟁, 매장 확인 필요처럼 상담원 또는 운영자 확인이 필요한 경우예요.
+- `REFUND_WINDOW_EXPIRED`: 음식 제공 또는 정산 상태 때문에 주문 취소는 불가능하고, 환불 가능 기간도 지난 경우예요.
+- `PAYMENT_CANCEL_PENDING`: 주문 취소 상태는 반영됐지만 결제 취소는 PG 응답 대기 중인 경우예요. 고객에게는 "주문은 취소됐고 환불은 처리 중"이라고 분리해서 안내해야 해요.
+
+멱등성 수준은 보통 세 가지로 볼 수 있어요.
+에러를 반환하는 방식, 중복 요청을 조용히 무시하는 방식, 기존 성공 결과를 다시 전달하는 방식이에요.
+`cancelOrder`는 고객이 네트워크 지연이나 불안 때문에 같은 취소 요청을 반복할 수 있으므로, 에러로 혼란을 주기보다 기존 취소 결과를 다시 전달하는 방식이 적절하다고 봤어요.
+다만 내부 outcome은 `ALREADY_CANCELED`로 구분해 로그와 운영 분석에서는 중복 요청임을 알 수 있게 했어요.
+응답에는 첫 취소 때 생성한 `cancelId`를 함께 담아, "새 취소가 아니라 기존 취소 결과를 다시 전달했다"는 것을 시스템도 추적할 수 있게 했어요.
+
+반대로 에러가 더 적절한 경우도 있어요.
+예를 들어 이미 사용한 비밀번호 재설정 토큰을 다시 사용하는 요청은 보안상 재사용을 허용하지 않고 명확한 에러를 반환해야 해요.
+또는 배송 완료 후 주소 변경처럼 상태 전이가 논리적으로 불가능한 명령은 "이미 처리됨"으로 부드럽게 넘기기보다 실패를 명확히 알려야 해요.
+
 ### Tool 설계 결정
 
 `OrderDetailView`는 내부 `Order`의 `deliveryAddress`, `canceledReason`, `canceledAt`, `riderLocation`을 의도적으로 제외했어요.
@@ -679,9 +880,10 @@ Tool별 view를 분리하면 LLM이 필요 이상의 정보를 근거로 답변�
 운영 환경에서 다국어 사용자 입력을 본격적으로 지원한다면 영어 description이나 한영 병기 description을 검토할 수 있지만, 이번 과제 범위에서는 한국어 description이 의도와 테스트 문맥에 가장 직접적이라고 판단했어요.
 
 `OrderTools`는 현재 하나의 클래스로 묶었어요.
-이번 단계의 Tool 3개는 모두 Mock 주문 aggregate 하나를 기준으로 조회하거나 상태를 바꾸는 작은 기능이고, 공통으로 `OrderMockService`와 view 변환기를 사용해요.
+이번 단계의 Tool 3개는 모두 Mock 주문 aggregate 하나를 기준으로 조회하거나 상태를 바꾸는 작은 기능이에요.
 지금 분리하면 클래스 수만 늘고 Tool 목록을 한눈에 보기 어려워져서 하나로 충분하다고 봤어요.
-다만 취소 가능 여부와 상태 전이 판단은 `Order.cancelIfPossible(...)`에 두고, `OrderTools`는 Tool 호출/로깅/결과 DTO 조립만 담당하게 했어요.
+다만 취소 가능 여부와 상태 전이 판단은 `Order.cancelIfPossible(...)`에 두고, 취소 히스토리 기록과 멱등 응답 재전달은 `OrderCancelService`로 분리했어요.
+`OrderTools`는 AI가 호출하는 진입점만 담당하고, 공통 Tool 로그는 `ToolLoggingAspect`에서 남기게 했어요.
 다만 기능이 늘어난다면 `OrderQueryTools`와 `OrderCommandTools`처럼 조회와 변경을 나누거나, 결제/환불 Tool이 생기면 `PaymentTools`로 분리하는 기준이 적절해요.
 
 주문 조회는 주문번호만으로 처리하지 않고, 서버가 알고 있는 현재 고객 ID와 주문 소유자를 함께 확인하도록 했어요.
@@ -704,6 +906,7 @@ LLM은 사용자가 강하게 요청하면 가능한 Tool을 호출하려고 할
 - `SupportControllerTest`: 빈 메시지/null 메시지 400 응답, LLM 실패 500 응답, ChatClient 응답 후 구조 검증 흐름을 검증
 - `SupportControllerTest`: 다른 배달앱 요청을 LLM 호출 전에 차단하고 현재 서비스 문의로 안내하는지 검증
 - `PolicyValidationAdvisorTest`: 검증 프롬프트가 정책 위반으로 판단한 응답을 상담원 확인 fallback JSON으로 교체하는지 검증
+- `OrderToolsTest`: 주문 소유자 검증, 이미 취소된 주문, 첫 취소 시 `cancelId` 생성, 재취소 시 첫 `cancelId`/취소 사유/취소 시각 재사용을 검증
 
 검증 명령:
 
@@ -809,3 +1012,11 @@ AI가 환불 가능 여부를 직접 추측하지 않고, 주문 상태 조회 t
 - [x] `2024-1238` 주문에 `order.cancel("고객 요청", ...)` 호출이 포함되어 `canceledReason`이 채워져 있는가?
 - [x] 설계 결정 3개 질문에 대한 "왜?" 답이 README에 있는가?
 - [x] 주문 조회/취소 Tool이 현재 고객 소유 주문만 반환하도록 검증하는가?
+
+### 멱등성 자가 점검
+
+- [x] Outcome 4가지를 모두 실행하고 LLM 응답을 기록했는가?
+- [x] 멱등성 분기 제거 후 코드 동작, LLM 응답, `canceledReason`/`canceledAt` 덮어씌움을 README에 기록했는가?
+- [x] 첫 취소 `cancelId`를 재취소 응답에서 재사용하고, 분기 제거 시 새 `cancelId`가 생기는 문제를 관찰했는가?
+- [x] 고객 오해 3가지 이상과 프로덕션 장애 3가지 이상을 작성했는가?
+- [x] Outcome enum 설계 근거와 신규 Outcome 2개 이상 아이디어를 작성했는가?
