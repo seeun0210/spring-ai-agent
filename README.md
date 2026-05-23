@@ -508,9 +508,24 @@ C 버전에서는 `getDeliveryStatus`가 실제로 라이더 위치를 반환할
 
 ### Spring AI 구현체 확인
 
-Spring AI 1.0.0 소스를 확인해 보니 `description`은 단순 주석이 아니라 모델 요청에 들어가는 실제 Tool metadata였어요.
+C 버전에서 왜 `getDeliveryStatus` 대신 `getOrderDetail`이 선택됐는지 궁금해서 Spring AI 1.0.0 구현체를 뜯어봤어요.
+확인해 보니 `description`은 단순 주석이 아니라 모델 요청에 들어가는 실제 Tool metadata였어요.
 
 흐름은 다음과 같아요.
+
+```mermaid
+flowchart TD
+    A[OrderTools @Tool method] --> B[ChatClient.defaultTools orderTools]
+    B --> C[ToolCallbacks.from]
+    C --> D[MethodToolCallbackProvider]
+    D --> E[ToolDefinitions.from method]
+    E --> F[ToolUtils.getToolDescription]
+    F --> G[ToolDefinition.description]
+    G --> H[OllamaChatModel.getTools]
+    H --> I[OllamaApi.ChatRequest.Tool.Function]
+    I --> J[Ollama request tools function description]
+    J --> K[LLM Tool 선택]
+```
 
 1. `ChatClient.Builder.defaultTools(orderTools)`는 내부적으로 `ToolCallbacks.from(toolObjects)`를 호출해요.
 2. `ToolCallbacks.from(...)`는 `MethodToolCallbackProvider`로 `@Tool`이 붙은 메서드를 찾고 `MethodToolCallback`을 만들어요.
@@ -520,11 +535,57 @@ Spring AI 1.0.0 소스를 확인해 보니 `description`은 단순 주석이 아
 확인한 핵심 구현:
 
 ```java
+// DefaultChatClientBuilder
+@Override
+public Builder defaultTools(Object... toolObjects) {
+    this.defaultRequest.tools(toolObjects);
+    return this;
+}
+```
+
+```java
+// DefaultChatClientRequestSpec
+@Override
+public ChatClientRequestSpec tools(Object... toolObjects) {
+    this.toolCallbacks.addAll(Arrays.asList(ToolCallbacks.from(toolObjects)));
+    return this;
+}
+```
+
+```java
+// ToolCallbacks
+public static ToolCallback[] from(Object... sources) {
+    return MethodToolCallbackProvider.builder()
+        .toolObjects(sources)
+        .build()
+        .getToolCallbacks();
+}
+```
+
+```java
+// MethodToolCallbackProvider
+.map(toolMethod -> MethodToolCallback.builder()
+    .toolDefinition(ToolDefinitions.from(toolMethod))
+    .toolMetadata(ToolMetadata.from(toolMethod))
+    .toolMethod(toolMethod)
+    .toolObject(toolObject)
+    .toolCallResultConverter(ToolUtils.getToolCallResultConverter(toolMethod))
+    .build())
+```
+
+```java
 // ToolDefinitions.builder(method)
 return DefaultToolDefinition.builder()
     .name(ToolUtils.getToolName(method))
     .description(ToolUtils.getToolDescription(method))
     .inputSchema(JsonSchemaGenerator.generateForMethodInput(method));
+```
+
+```java
+// ToolUtils.getToolDescription(method)
+return StringUtils.hasText(tool.description())
+    ? tool.description()
+    : method.getName();
 ```
 
 ```java
