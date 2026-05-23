@@ -10,4 +10,45 @@ public record CancelOrderResult(
         String canceledReason,
         OffsetDateTime canceledAt
 ) {
+
+    public static CancelOrderResult notFound(String orderId) {
+        return new CancelOrderResult(
+                orderId,
+                CancelOrderOutcome.NOT_FOUND,
+                null,
+                "주문을 찾을 수 없습니다.",
+                null,
+                null
+        );
+    }
+
+    public static CancelOrderResult from(Order order, CancelOrderOutcome outcome) {
+        return switch (outcome) {
+            case CANCELED -> new CancelOrderResult(
+                    order.getOrderId(),
+                    outcome,
+                    order.getStatus(),
+                    "주문이 취소되었습니다.",
+                    order.getCanceledReason(),
+                    order.getCanceledAt()
+            );
+            case ALREADY_CANCELED -> new CancelOrderResult(
+                    order.getOrderId(),
+                    outcome,
+                    order.getStatus(),
+                    "이미 취소된 주문입니다.",
+                    order.getCanceledReason(),
+                    order.getCanceledAt()
+            );
+            case NOT_CANCELABLE -> new CancelOrderResult(
+                    order.getOrderId(),
+                    outcome,
+                    order.getStatus(),
+                    "현재 주문 상태에서는 취소할 수 없습니다.",
+                    null,
+                    null
+            );
+            case NOT_FOUND -> throw new IllegalArgumentException("Use notFound(orderId) for missing orders.");
+        };
+    }
 }

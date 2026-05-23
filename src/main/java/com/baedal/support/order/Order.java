@@ -81,6 +81,23 @@ public class Order {
                 || status == OrderStatus.COOKING;
     }
 
+    public CancelOrderOutcome cancelIfPossible(String reason, OffsetDateTime canceledAt) {
+        if (status == OrderStatus.CANCELED) {
+            return CancelOrderOutcome.ALREADY_CANCELED;
+        }
+
+        if (!isCancelable()) {
+            return CancelOrderOutcome.NOT_CANCELABLE;
+        }
+
+        cancel(normalizeCancelReason(reason), canceledAt);
+        return CancelOrderOutcome.CANCELED;
+    }
+
+    private String normalizeCancelReason(String reason) {
+        return reason == null || reason.isBlank() ? "고객 요청" : reason;
+    }
+
     public void updateRiderLocation(String riderLocation) {
         this.riderLocation = riderLocation;
     }
