@@ -8,8 +8,12 @@ import org.springframework.ai.chat.client.advisor.api.CallAdvisorChain;
 import org.springframework.ai.chat.client.advisor.api.StreamAdvisor;
 import org.springframework.ai.chat.client.advisor.api.StreamAdvisorChain;
 import org.springframework.ai.chat.metadata.Usage;
+import org.springframework.ai.model.tool.ToolCallingChatOptions;
+import org.springframework.ai.tool.ToolCallback;
+import org.springframework.ai.tool.definition.ToolDefinition;
 import reactor.core.publisher.Flux;
 
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -35,6 +39,8 @@ public class PerformanceLoggingAdvisor implements CallAdvisor, StreamAdvisor {
 
     @Override
     public ChatClientResponse adviseCall(ChatClientRequest request, CallAdvisorChain chain) {
+        logPrompt(request);
+
         long startedAt = System.currentTimeMillis();
         ChatClientResponse response = chain.nextCall(request);
         long elapsedMs = System.currentTimeMillis() - startedAt;
@@ -59,6 +65,8 @@ public class PerformanceLoggingAdvisor implements CallAdvisor, StreamAdvisor {
 
     @Override
     public Flux<ChatClientResponse> adviseStream(ChatClientRequest request, StreamAdvisorChain chain) {
+        logPrompt(request);
+
         long startedAt = System.currentTimeMillis();
         AtomicInteger chunks = new AtomicInteger();
         AtomicReference<Usage> lastUsage = new AtomicReference<>();
@@ -107,5 +115,29 @@ public class PerformanceLoggingAdvisor implements CallAdvisor, StreamAdvisor {
             return null;
         }
         return response.chatResponse().getMetadata().getUsage();
+    }
+
+    private void logPrompt(ChatClientRequest request) {
+        List<ToolDefinition> toolDefinitions = toolDefinitionsOf(request);
+
+        log.info(
+                "LLM request prompt. endpoint={}, messageCount={}, toolCount={}\nmessages:\n{}\ntools:\n{}",
+                endpoint,
+                request.prompt().getInstructions().size(),
+                toolDefinitions.size(),
+                PromptLogFormatter.formatMessages(request.prompt().getInstructions()),
+                PromptLogFormatter.formatToolDefinitions(toolDefinitions)
+        );
+    }
+
+    private List<ToolDefinition> toolDefinitionsOf(ChatClientRequest request) {
+        if (request.prompt().getOptions() instanceof ToolCallingChatOptions toolCallingChatOptions) {
+            return toolCallingChatOptions.getToolCallbacks()
+                    .stream()
+                    .map(ToolCallback::getToolDefinition)
+                    .toList();
+        }
+
+        return List.of();
     }
 }

@@ -17,6 +17,7 @@ Spring AI 기반 배달 상담 에이전트 Tool Calling / 멱등성 과제 제�
 주요 호출 endpoint:
 
 ```text
+POST /api/v1/chat
 POST /api/v1/assistant
 ```
 
@@ -30,6 +31,8 @@ POST /api/v1/assistant
 - `CancelHistoryService`로 첫 취소 `cancelId` 기록 및 재취소 멱등 응답 재전달
 - `ToolLoggingAspect`로 `@Tool` 호출 로그를 AOP에서 공통 기록
 - `getDeliveryStatus` description A/B/C 실험으로 Tool 호출률 비교
+- `/api/v1/chat`은 Tool 없는 기준선, `/api/v1/assistant`는 Tool 3개 등록 endpoint로 분리
+- `PerformanceLoggingAdvisor`와 `ObservedToolCallingManager`로 LLM 프롬프트, Tool 정의, ToolResponseMessage, 토큰/시간 로그 기록
 
 Mock 주문 seed 확인:
 
@@ -701,6 +704,205 @@ order_cancellations
 - requested_at
 ```
 
+## 4단계: Observability
+
+기존에도 `[Tool] getXxx(...)`와 최종 `LLM call completed` 로그는 보고 있었지만, Tool 왕복 구조를 보기에는 부족했어요.
+이번 단계에서는 Tool 없는 `/api/v1/chat`과 Tool 3개가 등록된 `/api/v1/assistant`를 분리하고, `PerformanceLoggingAdvisor`에서 요청 프롬프트와 Tool 정의를, `ObservedToolCallingManager`에서 Tool 실행 후 2차 프롬프트를 기록하도록 보강했어요.
+
+> 이 로그는 System Prompt, 사용자 입력, Tool 결과를 모두 찍기 때문에 운영 환경에서는 그대로 켜두면 안 돼요. 이번 과제처럼 로컬 관찰 목적에서만 사용하는 로그라고 봤어요.
+
+### 구현 메모
+
+- `/api/v1/chat`: `chatClient` 사용, Tool 미등록 기준선
+- `/api/v1/assistant`: `syncChatClient` 사용, `getOrderDetail`, `getDeliveryStatus`, `cancelOrder` 등록
+- `PerformanceLoggingAdvisor`: LLM 호출 전 `messages`와 `tools`를 출력하고, 호출 후 elapsed/token 사용량 출력
+- `ObservedToolCallingManager`: Spring AI의 `ToolCallingManager`를 감싸서 Tool 정의 resolve와 ToolResponseMessage가 붙은 conversation history 출력
+- `ToolCallingObservabilityConfig`: `ToolCallingManager` Bean을 `ChatClientConfig`와 분리해 순환 참조 없이 등록
+
+### Tool 왕복 로그 관찰
+
+요청:
+
+```bash
+curl -s -X POST http://localhost:18096/api/v1/assistant \
+  -H "Content-Type: application/json" \
+  -d '{"message":"주문번호 2024-1234 배달 어디쯤에 있어요?"}'
+```
+
+응답:
+
+```text
+핵심 답변: 주문번호 2024-1234는 현재 배달 중입니다. 라이더는 역삼역 사거리에 있습니다. 추가 정보가 필요하지 않습니다.
+
+다음에 고객이 할 행동: 주문 상태를 다시 확인하거나 배달 예정 시간을 확인해 주세요.
+```
+
+1차 LLM 호출 로그:
+
+```text
+LLM request prompt. endpoint=assistant, messageCount=2, toolCount=3
+messages:
+1. type=SYSTEM, text="[역할]
+당신은 배달 플랫폼의 고객 상담 AI 에이전트입니다.
+주문, 배달 상태, 주문 취소, 환불, 결제, 기타 문의를 분류하고 고객이 다음에 무엇을 해야 하는지 안내합니다.
+
+[규칙]
+- 반드시 한국어로만 응답합니다.
+- 항상 존댓말을 사용합니다.
+- 고객 문의를 ORDER, DELIVERY, CANCEL, REFUND, PAYMENT, ETC 중 하나로 분류합니다.
+- 정보가 부족하면 추측하지 말고, neededInfo에 필요한 정보를 적습니다.
+- 실제 주문 상태, 환불 가능 여부, 결제 취소 가능 여부는 시스템 확인이 필요하다고 안내합니다.
+- 주문번호가 있고 주문 메뉴, 배달 상태, 주문 취소를 물으면 반드시 사용 가능한 Tool로 실제 Mock 주문을 조회합니다.
+- 고객이 "취소해주세요", "취소해줘"처럼 실제 취소 실행을 요청하면 취소 사유가 없어도 reason을 "고객 요청"으로 하여 cancelOrder Tool을 호출합니다.
+- 고객이 "한 번 더 취소해주세요", "다시 취소해주세요"처럼 재취소 실행을 요청하면 이미 취소 여부를 먼저 조회하지 말고 cancelOrder Tool을 호출합니다.
+- 취소 실행 요청은 주문 상태를 먼저 조회하지 말고 cancelOrder Tool의 outcome으로 취소 성공, 이미 취소, 취소 불가, 주문 없음 여부를 판단합니다.
+- 고객이 취소 가능 여부만 물으면 실제 취소를 실행하지 말고 조회 Tool 결과를 바탕으로 안내합니다.
+- 취소 또는 환불 완료 주문을 되돌리거나 음식 제공을 확정하지 않습니다. 이런 요청은 새 주문 진행 또는 고객센터/상담원 확인으로 안내합니다.
+- 취소 또는 환불 완료 주문에 대해 가게나 라이더에게 직접 연락하라고 안내하지 않습니다.
+- Tool 조회 결과가 없으면 주문을 찾을 수 없다고 안내하고 추측하지 않습니다.
+- Tool 결과의 outcome, status, riderLocation, items 값을 우선해서 답변합니다.
+- 상담원이 확인해야 하는 사안이면 handoffRequired를 true로 설정하고 handoffReason에 사유를 적습니다.
+- urgency는 고객 피해 가능성, 결제/환불 영향, 배달 지연 정도를 기준으로 판단합니다.
+
+[금지]
+- 고객, 사장님, 라이더의 전화번호, 주소, 계좌 등 개인정보를 노출하지 않습니다.
+- 환불, 보상, 쿠폰 지급을 확정적으로 약속하지 않습니다.
+- 타 배달 플랫폼을 추천하거나 비교하지 않습니다.
+
+[응답 포맷]
+1) 핵심 답변은 3문장 이내로 요약합니다.
+2) 필요한 추가 정보를 질문합니다.
+3) 고객이 다음에 취할 액션을 제안합니다.
+"
+2. type=USER, text="주문번호 2024-1234 배달 어디쯤에 있어요?"
+tools:
+- name=getOrderDetail
+  description="주문번호로 주문 메뉴, 수량, 금액, 주문 상태를 조회합니다."
+  inputSchema={
+  "$schema" : "https://json-schema.org/draft/2020-12/schema",
+  "type" : "object",
+  "properties" : {
+    "orderId" : {
+      "type" : "string",
+      "description" : "조회할 주문번호"
+    }
+  },
+  "required" : [ "orderId" ],
+  "additionalProperties" : false
+}
+- name=getDeliveryStatus
+  description="주문번호로 배달 상태와 라이더 위치를 조회합니다."
+  inputSchema={
+  "$schema" : "https://json-schema.org/draft/2020-12/schema",
+  "type" : "object",
+  "properties" : {
+    "orderId" : {
+      "type" : "string",
+      "description" : "조회할 주문번호"
+    }
+  },
+  "required" : [ "orderId" ],
+  "additionalProperties" : false
+}
+- name=cancelOrder
+  description="고객이 주문 취소 실행을 요청하면 주문번호와 취소 사유를 받아 주문을 취소하고 결과를 반환합니다.
+"취소해주세요", "취소해줘", "방금 시킨 건 취소"처럼 실행 의도가 명확하면 사유가 없어도 reason을 "고객 요청"으로 넣어 호출합니다.
+"한 번 더 취소해주세요", "다시 취소해주세요"처럼 재취소 요청이 포함되어도 이 Tool을 호출하여 ALREADY_CANCELED outcome을 확인합니다.
+배달 완료, 이미 취소, 존재하지 않는 주문을 포함한 모든 취소 실행 요청은 이 Tool을 호출하고 outcome으로 결과를 판단합니다.
+단순히 취소 가능 여부만 묻는 경우에는 이 Tool을 호출하지 않습니다.
+"
+  inputSchema={
+  "$schema" : "https://json-schema.org/draft/2020-12/schema",
+  "type" : "object",
+  "properties" : {
+    "orderId" : {
+      "type" : "string",
+      "description" : "취소할 주문번호"
+    },
+    "reason" : {
+      "type" : "string",
+      "description" : "고객이 말한 취소 사유"
+    }
+  },
+  "required" : [ "orderId", "reason" ],
+  "additionalProperties" : false
+}
+```
+
+Tool 정의 resolve 로그:
+
+```text
+LLM tool definitions resolved. toolCount=3
+- name=getOrderDetail
+- name=getDeliveryStatus
+- name=cancelOrder
+```
+
+Tool 실행 시점 로그:
+
+```text
+Executing tool call: getDeliveryStatus
+[Tool] getDeliveryStatus(orderId=2024-1234)
+```
+
+2차 LLM 호출에 들어가는 ToolResponseMessage 로그:
+
+```text
+LLM tool response prompt prepared. messageCount=4
+1. type=SYSTEM, text="[1차 LLM 호출과 동일한 System Prompt 전문]"
+2. type=USER, text="주문번호 2024-1234 배달 어디쯤에 있어요?"
+3. type=ASSISTANT, text="", toolCalls=[ToolCall[id=, type=function, name=getDeliveryStatus, arguments={"orderId":"2024-1234"}]]
+4. type=TOOL, responses=[ToolResponse[id=, name=getDeliveryStatus, responseData={"orderId":"2024-1234","status":"DELIVERING","riderLocation":"역삼역 사거리","message":"배달 중입니다."}]]
+```
+
+최종 LLM 호출 완료 로그:
+
+```text
+LLM call completed. endpoint=assistant, elapsedMs=24504, promptTokens=2369, completionTokens=1550, totalTokens=3919
+```
+
+### 입력 토큰 비교
+
+같은 `"안녕하세요"` 요청을 Tool 없는 endpoint와 Tool 등록 endpoint에 각각 보냈어요.
+
+| 엔드포인트 | 같은 질문 | 입력 토큰 | 출력 토큰 | 응답 시간 |
+| --- | --- | ---: | ---: | ---: |
+| `/api/v1/chat` (Tool 없음) | `"안녕하세요"` | 691 | 1528 | 26505ms |
+| `/api/v1/assistant` (Tool 3개 등록) | `"안녕하세요"` | 1128 | 1301 | 20992ms |
+
+응답 본문:
+
+```text
+[/api/v1/chat]
+핵심 답변: 안녕하세요! 배달 플랫폼 관련 문의가 있으신가요? 구체적인 내용을 알려주시면 도와드리겠습니다.
+
+필요한 추가 정보: 주문번호, 주문 메뉴, 배달 상태, 취소 여부 등 구체적인 정보를 알려주시면 더 정확한 도움을 드릴 수 있습니다.
+
+다음 액션: 주문 상태나 문제를 설명해 주시면 즉시 도와드리겠습니다.
+```
+
+```text
+[/api/v1/assistant]
+안녕하세요! 고객님, 어떤 도움이 필요하신가요?
+주문 상태, 배달 정보, 취소, 환불, 결제 관련 문의가 있으신가요?
+다음에 해야 할 행동은 주문 번호를 알려주시거나 구체적인 문제를 설명해 주세요.
+```
+
+입력 토큰 차이는 `1128 - 691 = 437`토큰이에요.
+사용자 질문은 같고 System Prompt도 같기 때문에 차이는 `/api/v1/assistant`에 붙은 Tool 3개의 `name`, `description`, `inputSchema` JSON 스키마에서 발생한 것으로 봤어요.
+인사처럼 Tool을 호출하지 않는 질문이어도, Tool 후보를 모델에게 보여줘야 하므로 입력 토큰은 먼저 증가해요.
+
+Tool이 실제로 호출되는 질문도 비교했어요.
+
+| 엔드포인트 | 질문 | 입력 토큰 | 출력 토큰 | 응답 시간 |
+| --- | --- | ---: | ---: | ---: |
+| `/api/v1/chat` (Tool 없음 기준선) | `"안녕하세요"` | 691 | 1528 | 26505ms |
+| `/api/v1/assistant` (Tool 호출) | `"주문번호 2024-1234 배달 어디쯤에 있어요?"` | 2369 | 1550 | 24504ms |
+
+Tool 호출 시나리오는 Tool 없는 기준선 대비 입력 토큰이 `2369 / 691 = 3.43배`였어요.
+단순히 Tool schema 3개가 추가되는 것에서 끝나지 않고, 1차 LLM이 Tool call을 선택한 뒤 `ToolResponseMessage`가 conversation history에 붙어서 2차 LLM 호출이 다시 일어나기 때문이에요.
+그래서 Tool Calling은 정확한 외부 상태를 가져오는 장점이 있지만, 호출이 필요한 질문에서는 프롬프트 왕복과 토큰 비용이 함께 늘어납니다.
+
 ## 테스트 코드
 
 기본 검증은 실제 Ollama를 호출하지 않는 단위/웹 계층 테스트로 작성했어요.
@@ -749,3 +951,12 @@ BUILD SUCCESSFUL
 - [x] 각 버전별 Tool 호출 횟수와 응답의 "역삼역 사거리" 포함 횟수가 수치 표로 기록되어 있는가?
 - [x] 버전 C에서 잘못된 Tool 호출과 추측성 답변이 구체적으로 기록되어 있는가?
 - [x] description 필수 항목 4가지와 오래된 description 방지 대책이 작성되어 있는가?
+
+### Observability
+
+- [x] `/api/v1/assistant`에서 1차 LLM 호출 프롬프트와 Tool JSON 스키마를 README에 기록했는가?
+- [x] `[Tool] getDeliveryStatus(orderId=2024-1234)` 로그를 기록했는가?
+- [x] ToolResponseMessage가 포함된 2차 LLM 호출 conversation history를 기록했는가?
+- [x] 최종 `LLM call completed`의 응답 시간과 입출력 토큰을 기록했는가?
+- [x] `/api/v1/chat`과 `/api/v1/assistant`의 같은 질문 입력 토큰 차이를 수치로 비교했는가?
+- [x] Tool 호출 시나리오가 Tool 없는 기준선 대비 몇 배의 입력 토큰을 쓰는지 기록했는가?

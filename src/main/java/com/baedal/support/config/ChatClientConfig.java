@@ -32,6 +32,11 @@ public class ChatClientConfig {
     }
 
     @Bean
+    public PerformanceLoggingAdvisor assistantPerformanceLoggingAdvisor() {
+        return new PerformanceLoggingAdvisor("assistant");
+    }
+
+    @Bean
     public PerformanceLoggingAdvisor streamPerformanceLoggingAdvisor() {
         return new PerformanceLoggingAdvisor("stream");
     }
@@ -63,11 +68,19 @@ public class ChatClientConfig {
     }
 
     @Bean
+    public ChatClient chatClient() {
+        return builder.clone()
+                .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
+                .defaultAdvisors(chatPerformanceLoggingAdvisor())
+                .build();
+    }
+
+    @Bean
     public ChatClient syncChatClient(OrderTools orderTools) {
         return builder.clone()
                 .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
                 .defaultTools(orderTools)
-                .defaultAdvisors(chatPerformanceLoggingAdvisor())
+                .defaultAdvisors(assistantPerformanceLoggingAdvisor())
                 .build();
     }
 
