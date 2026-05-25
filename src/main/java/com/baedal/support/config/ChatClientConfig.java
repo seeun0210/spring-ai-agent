@@ -1,0 +1,82 @@
+package com.baedal.support.config;
+
+import com.baedal.support.advisor.PerformanceLoggingAdvisor;
+import com.baedal.support.advisor.PolicyValidationAdvisor;
+import com.baedal.support.prompt.BaedalPrompt;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.RequiredArgsConstructor;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+@RequiredArgsConstructor
+public class ChatClientConfig {
+    private final ChatClient.Builder builder;
+
+    @Bean
+    public PerformanceLoggingAdvisor supportPerformanceLoggingAdvisor() {
+        return new PerformanceLoggingAdvisor("support");
+    }
+
+    @Bean
+    public PerformanceLoggingAdvisor promptLabPerformanceLoggingAdvisor() {
+        return new PerformanceLoggingAdvisor("promptLab");
+    }
+
+    @Bean
+    public PerformanceLoggingAdvisor chatPerformanceLoggingAdvisor() {
+        return new PerformanceLoggingAdvisor("chat");
+    }
+
+    @Bean
+    public PerformanceLoggingAdvisor streamPerformanceLoggingAdvisor() {
+        return new PerformanceLoggingAdvisor("stream");
+    }
+
+    @Bean
+    public ChatClient policyValidationChatClient() {
+        return builder.clone()
+                .build();
+    }
+
+    @Bean
+    public PolicyValidationAdvisor policyValidationAdvisor(
+            @Qualifier("policyValidationChatClient") ChatClient policyValidationChatClient,
+            ObjectMapper objectMapper
+    ) {
+        return new PolicyValidationAdvisor(policyValidationChatClient, objectMapper);
+    }
+
+    @Bean
+    public ChatClient supportChatClient(PolicyValidationAdvisor policyValidationAdvisor) {
+        return builder.clone()
+                .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
+                .defaultAdvisors(policyValidationAdvisor, supportPerformanceLoggingAdvisor())
+                .build();
+    }
+
+    @Bean
+    public ChatClient syncChatClient() {
+        return builder.clone()
+                .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
+                .defaultAdvisors(chatPerformanceLoggingAdvisor())
+                .build();
+    }
+
+    @Bean
+    public ChatClient streamingChatClient() {
+        return builder.clone()
+                .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
+                .defaultAdvisors(streamPerformanceLoggingAdvisor())
+                .build();
+    }
+
+    @Bean
+    public ChatClient promptLabChatClient() {
+        return builder.clone()
+                .defaultAdvisors(promptLabPerformanceLoggingAdvisor())
+                .build();
+    }
+}

@@ -26,6 +26,11 @@ out/
 !**/src/main/**/out/
 !**/src/test/**/out/
 
+### Logs ###
+logs/
+*.log
+!docs/experiment-logs/*.log
+
 ### NetBeans ###
 /nbproject/private/
 /nbbuild/
