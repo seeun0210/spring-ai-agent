@@ -10,17 +10,17 @@ import org.springframework.web.bind.annotation.*;
 @RequestMapping("/api/v1/chat")
 public class ChatController {
 
-    private final ChatClient syncChatClient;
+    private final ChatClient chatClient;
 
     public ChatController(
-            @Qualifier("syncChatClient") ChatClient syncChatClient
+            @Qualifier("chatClient") ChatClient chatClient
     ) {
-        this.syncChatClient = syncChatClient;
+        this.chatClient = chatClient;
     }
 
     @PostMapping
     public String chat(@Valid @RequestBody ChatRequest request) {
-        return syncChatClient
+        return chatClient
                 .prompt()
                 .user(request.message())
                 .call()
