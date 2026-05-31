@@ -1,11 +1,11 @@
 package com.baedal.support.controller;
 
 import com.baedal.support.dto.ChatRequest;
+import com.baedal.support.service.AssistantService;
 import jakarta.validation.Valid;
-import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -13,18 +13,17 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/v1/assistant")
 public class AssistantController {
 
-    private final ChatClient syncChatClient;
+    private final AssistantService assistantService;
 
-    public AssistantController(@Qualifier("syncChatClient") ChatClient syncChatClient) {
-        this.syncChatClient = syncChatClient;
+    public AssistantController(AssistantService assistantService) {
+        this.assistantService = assistantService;
     }
 
     @PostMapping
-    public String assist(@Valid @RequestBody ChatRequest request) {
-        return syncChatClient
-                .prompt()
-                .user(request.message())
-                .call()
-                .content();
+    public String assist(
+            @RequestHeader(value = "X-Session-Id", defaultValue = "default") String sessionId,
+            @Valid @RequestBody ChatRequest request
+    ) {
+        return assistantService.assist(sessionId, request.message());
     }
 }

@@ -8,6 +8,11 @@ spring:
         model: qwen3:4b
         options:
           temperature: 0.3
+    chat:
+      memory:
+        repository:
+          jdbc:
+            initialize-schema: never
 
 logging:
   level:

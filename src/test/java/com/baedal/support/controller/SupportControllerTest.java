@@ -2,6 +2,8 @@ package com.baedal.support.controller;
 
 import com.baedal.support.dto.SupportResponse;
 import com.baedal.support.guard.SupportRequestGuard;
+import com.baedal.support.memory.ConversationIdResolver;
+import com.baedal.support.service.SupportService;
 import com.baedal.support.validator.SupportResponseValidator;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -15,7 +17,9 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.util.List;
+import java.util.function.Consumer;
 
+import org.mockito.ArgumentMatchers;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -25,7 +29,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @WebMvcTest(SupportController.class)
-@Import({SupportRequestGuard.class, SupportResponseValidator.class, GlobalExceptionHandler.class})
+@Import({SupportService.class, SupportRequestGuard.class, SupportResponseValidator.class, GlobalExceptionHandler.class})
 class SupportControllerTest {
 
     @Autowired
@@ -33,6 +37,9 @@ class SupportControllerTest {
 
     @MockitoBean(name = "supportChatClient")
     private ChatClient supportChatClient;
+
+    @MockitoBean
+    private ConversationIdResolver conversationIdResolver;
 
     @Test
     void triageReturnsStructuredPrivacyPolicyResponse() throws Exception {
@@ -205,6 +212,8 @@ class SupportControllerTest {
         ChatClient.CallResponseSpec responseSpec = mock(ChatClient.CallResponseSpec.class);
 
         when(supportChatClient.prompt()).thenReturn(requestSpec);
+        when(conversationIdResolver.resolve(ArgumentMatchers.anyString())).thenReturn("customer-1:test-session");
+        when(requestSpec.advisors(ArgumentMatchers.<Consumer<ChatClient.AdvisorSpec>>any())).thenReturn(requestSpec);
         when(requestSpec.user(userMessage)).thenReturn(requestSpec);
         when(requestSpec.call()).thenReturn(responseSpec);
         when(responseSpec.entity(SupportResponse.class)).thenReturn(response);
