@@ -41,7 +41,7 @@ public class ToolExecutionPolicy {
         List<String> explicitOrderIds = valueAsStringList(context.get(EXPLICIT_ORDER_IDS));
         String confirmedOrderId = valueAsString(context.get(CONFIRMED_ORDER_ID));
 
-        if (orderId != null && explicitOrderIds.contains(orderId)) {
+        if (orderId != null && explicitOrderIds.size() == 1 && explicitOrderIds.contains(orderId)) {
             stateRepository.clearPendingCancel(conversationId);
             return ToolPolicyDecision.allow();
         }

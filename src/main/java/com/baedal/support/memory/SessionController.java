@@ -1,5 +1,6 @@
 package com.baedal.support.memory;
 
+import com.baedal.support.tool.ConversationOrderStateRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.memory.ChatMemory;
@@ -22,6 +23,7 @@ public class SessionController {
     private final ChatMemory chatMemory;
     private final ChatMemoryRepository chatMemoryRepository;
     private final ConversationIdResolver conversationIdResolver;
+    private final ConversationOrderStateRepository orderStateRepository;
 
     @GetMapping("/{sessionId}/messages")
     public List<MessageView> messages(@PathVariable String sessionId) {
@@ -35,6 +37,7 @@ public class SessionController {
     public void clear(@PathVariable String sessionId) {
         String conversationId = conversationIdResolver.resolve(sessionId);
         chatMemory.clear(conversationId);
+        orderStateRepository.clear(conversationId);
         log.info("[Session] clear sessionId={}", sessionId);
     }
 

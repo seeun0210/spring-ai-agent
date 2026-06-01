@@ -29,6 +29,25 @@ class ToolExecutionPolicyTest {
     }
 
     @Test
+    void blocksCancelOrderWhenCurrentRequestMentionsMultipleOrderIds() {
+        ToolPolicyDecision decision = policy.check(
+                "cancelOrder",
+                "{\"orderId\":\"2024-1234\",\"reason\":\"고객 요청\"}",
+                context(Map.of(
+                        ToolExecutionPolicy.CONVERSATION_ID, "customer-1:s1",
+                        ToolExecutionPolicy.EXPLICIT_ORDER_IDS, List.of("2024-1234", "2024-1235"),
+                        ToolExecutionPolicy.RECENT_ORDER_IDS, List.of("2024-1234", "2024-1235")
+                ))
+        );
+
+        assertThat(decision.allowed()).isFalse();
+        assertThat(decision.toolResultJson())
+                .contains("\"outcome\":\"CONFIRMATION_REQUIRED\"")
+                .contains("2024-1234")
+                .contains("2024-1235");
+    }
+
+    @Test
     void blocksCancelOrderWhenLlmInfersOrderIdWithoutExplicitOrConfirmedOrder() {
         ToolPolicyDecision decision = policy.check(
                 "cancelOrder",

@@ -1,5 +1,6 @@
 package com.baedal.support.memory;
 
+import com.baedal.support.tool.ConversationOrderStateRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.memory.ChatMemoryRepository;
@@ -18,7 +19,13 @@ class SessionControllerTest {
     private final ChatMemoryRepository repository = config.chatMemoryRepository();
     private final ChatMemory chatMemory = config.chatMemory(repository);
     private final ConversationIdResolver conversationIdResolver = org.mockito.Mockito.mock(ConversationIdResolver.class);
-    private final SessionController controller = new SessionController(chatMemory, repository, conversationIdResolver);
+    private final ConversationOrderStateRepository orderStateRepository = new ConversationOrderStateRepository();
+    private final SessionController controller = new SessionController(
+            chatMemory,
+            repository,
+            conversationIdResolver,
+            orderStateRepository
+    );
 
     @Test
     void returnsMessagesForSessionInOrder() {
@@ -52,5 +59,18 @@ class SessionControllerTest {
 
         assertThat(controller.messages("session-a")).isEmpty();
         assertThat(controller.sessions()).containsExactly("session-b");
+    }
+
+    @Test
+    void clearsOrderStateForSession() {
+        when(conversationIdResolver.resolve("session-a")).thenReturn("customer-1:session-a");
+        orderStateRepository.rememberExplicitOrderIds("customer-1:session-a", List.of("2024-1234"));
+        orderStateRepository.markPendingCancel("customer-1:session-a", "2024-1234");
+
+        controller.clear("session-a");
+
+        assertThat(orderStateRepository.get("customer-1:session-a").activeOrderId()).isNull();
+        assertThat(orderStateRepository.get("customer-1:session-a").recentOrderIds()).isEmpty();
+        assertThat(orderStateRepository.get("customer-1:session-a").pendingCancelOrderId()).isNull();
     }
 }

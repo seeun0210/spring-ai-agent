@@ -38,4 +38,11 @@ public class ConversationOrderStateRepository {
         }
         states.computeIfPresent(conversationId, (key, current) -> current.clearPendingCancel());
     }
+
+    public void clear(String conversationId) {
+        if (conversationId == null) {
+            return;
+        }
+        states.remove(conversationId);
+    }
 }
