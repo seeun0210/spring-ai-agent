@@ -1,13 +1,12 @@
 # loop-play-spring-ai-agent
 
-Spring AI 기반 배달 상담 에이전트 Tool Calling / 멱등성 과제 제출 문서입니다.
-
 ## 실행 환경
 
 - Java 17
 - Spring Boot 3.4.1
 - Spring AI 1.0.0
-- Ollama `qwen3:4b`
+- Ollama `qwen3:4b` (`4B`는 약 40억 개 파라미터 모델이라는 뜻이에요)
+- 모델 비교 실험: Ollama `qwen3:8b` (`8B`는 약 80억 개 파라미터 모델이라는 뜻이에요)
 - temperature: `0.3`
 
 ```bash
@@ -17,8 +16,11 @@ Spring AI 기반 배달 상담 에이전트 Tool Calling / 멱등성 과제 제�
 주요 호출 endpoint:
 
 ```text
-POST /api/v1/chat
 POST /api/v1/assistant
+POST /api/v1/support
+GET /api/v1/session/{sessionId}/messages
+GET /api/v1/session/ids
+DELETE /api/v1/session/{sessionId}
 ```
 
 curl 예시는 같은 서버와 mock 고객을 기준으로 재현하기 위해 아래 변수를 사용해요.
@@ -26,1228 +28,1442 @@ curl 예시는 같은 서버와 mock 고객을 기준으로 재현하기 위해 
 ```bash
 export BASE_URL="http://localhost:8080"
 export CUSTOMER_ID="customer-1"
+export SESSION_ID="cust-A"
 ```
 
-`/api/v1/assistant`는 주문 소유자 검증을 위해 `X-Customer-Id` 헤더가 필요해요.
-실제 운영 코드라면 이 헤더를 신뢰하지 않고 인증 컨텍스트에서 검증된 사용자 ID를 읽어야 해요.
+`/api/v1/assistant`와 `/api/v1/support`는 주문 소유자 검증과 Memory 세션 분리를 위해 `X-Customer-Id`, `X-Session-Id` 헤더를 사용해요.
+실제 운영 코드라면 `X-Customer-Id`를 직접 신뢰하지 않고 인증 컨텍스트에서 검증된 사용자 ID를 읽어야 해요.
 
 ## 구현 범위
 
-- `OrderTools`에 `getOrderDetail`, `getDeliveryStatus`, `cancelOrder` Tool 구현
-- `OrderMockService`에 Mock 주문 4건 추가, 총 6건 seed
-- `AssistantController`, `SupportController` 양쪽에 `.defaultTools(orderTools)` 등록
-- `CurrentCustomerProvider`와 `findByIdForCustomer(...)`로 주문 소유자 검증
-- `OrderCancelService`로 취소 흐름 분리
-- `CancelHistoryService`로 첫 취소 `cancelId` 기록 및 재취소 멱등 응답 재전달
-- `ToolLoggingAspect`로 `@Tool` 호출 로그를 AOP에서 공통 기록
-- `getDeliveryStatus` description A/B/C 실험으로 Tool 호출률 비교
-- `/api/v1/chat`은 Tool 없는 기준선, `/api/v1/assistant`는 Tool 3개 등록 endpoint로 분리
-- `PerformanceLoggingAdvisor`와 `ObservedToolCallingManager`로 LLM 프롬프트, Tool 정의, ToolResponseMessage, 토큰/시간 로그 기록
+- `ChatMemoryConfig`에서 `ChatMemoryRepository`, `MessageWindowChatMemory`, `MessageChatMemoryAdvisor` 구성
+- `MAX_MESSAGES = 20`으로 conversation id별 최근 20 messages 유지
+- `ConversationIdResolver`로 `X-Customer-Id`와 `X-Session-Id`를 묶어 고객별 conversation id 생성
+- `AssistantService`, `SupportService`에서 `ChatMemory.CONVERSATION_ID`를 ChatClient 호출에 전달
+- `SessionController`로 현재 고객의 세션 메시지 조회, 세션 목록 조회, 세션 삭제 지원
+- `application-jdbc.yml`에 JDBC Chat Memory 전환 예시 추가
+- Memory 설정/세션 API/서비스 conversation id 전달 테스트 추가
 
-Mock 주문 seed 확인:
+## Round 3에서 구현한 Chat Memory
 
-```text
-OrderMockService seeded — 6건
-```
-
-Mock 데이터 4건 추가 코드:
+Round 3에서는 `/api/v1/assistant`와 `/api/v1/support`에 세션 단위 Chat Memory를 붙였어요.
+클라이언트가 `X-Session-Id` 헤더를 보내면 같은 세션의 최근 대화를 다음 LLM 호출에 다시 넣고, 헤더가 없으면 `default` 세션을 사용해요.
+다만 `X-Session-Id`만 conversation id로 쓰면 다른 고객이 같은 세션 ID를 재사용했을 때 이전 대화 문맥이 프롬프트에 섞일 수 있어요.
+그래서 현재 구현은 `ConversationIdResolver`에서 `X-Customer-Id`와 `X-Session-Id`를 묶어 `customer-1:cust-A` 같은 conversation id를 만들어요.
 
 ```java
-put(new Order(
-        "2024-1236",
-        "customer-1",
-        OrderStatus.DELIVERED,
-        List.of(
-                new OrderItem("김치찌개", 1, 11000),
-                new OrderItem("공기밥", 1, 1000)
-        ),
-        "서울시 서초구 서초대로 42",
-        null,
-        baseTime.minusHours(3)
-));
-put(new Order(
-        "2024-1237",
-        "customer-1",
-        OrderStatus.COOKING,
-        List.of(
-                new OrderItem("불고기버거", 2, 7000),
-                new OrderItem("감자튀김", 1, 3500)
-        ),
-        "서울시 강남구 선릉로 77",
-        null,
-        baseTime.minusMinutes(20)
-));
+String conversationId = conversationIdResolver.resolve(sessionId);
 
-Order canceledOrder = new Order(
-        "2024-1238",
-        "customer-1",
-        OrderStatus.ACCEPTED,
-        List.of(
-                new OrderItem("마라탕", 1, 15000),
-                new OrderItem("꿔바로우", 1, 12000)
-        ),
-        "서울시 송파구 올림픽로 1",
-        null,
-        baseTime.minusMinutes(30)
-);
-canceledOrder.cancelIfPossible("고객 요청", baseTime.minusMinutes(25));
-put(canceledOrder);
-
-put(new Order(
-        "2024-1239",
-        "customer-1",
-        OrderStatus.ACCEPTED,
-        List.of(
-                new OrderItem("초밥 세트", 1, 18000),
-                new OrderItem("미소장국", 1, 1000)
-        ),
-        "서울시 마포구 양화로 55",
-        null,
-        baseTime.minusMinutes(10)
-));
+chatClient.prompt()
+    .advisors(advisors -> advisors.param(ChatMemory.CONVERSATION_ID, conversationId))
+    .user(request.message())
+    .call()
+    .content();
 ```
 
-## Tool Calling 사전 실험
+메모리 구현은 `MessageWindowChatMemory`를 사용했고, 기준값은 `MAX_MESSAGES = 20`으로 잡았어요.
+이 값은 전체 서버 기준 20개가 아니라 conversation id마다 최근 20 messages를 뜻하고, USER/ASSISTANT 왕복 기준으로는 약 10턴을 유지해요.
 
-하나의 요청 안에 메뉴 조회와 배달 상태 조회 의도를 함께 넣어 Tool 선택이 어떻게 되는지 확인했어요.
-상태를 바꾸는 `cancelOrder`는 제외하고, read-only Tool 두 개가 함께 호출되는지만 먼저 봤어요.
+20을 운영 최적값이라고 확정한 것은 아니고, Round 3 실험의 기준값으로 선택했어요.
+배달 상담은 보통 "주문번호 제시 -> 상태 확인 -> 다른 주문 전환 -> 취소 가능 여부 확인 -> 취소 실행/재확인"처럼 3~6턴 안에서 끝난다고 가정했어요.
+그 기준에서는 20 messages가 평균 상담보다 여유가 있고, 과제의 10턴 시나리오를 잘라내지 않고 관찰할 수 있는 최소 기준선이 돼요.
+반대로 무제한으로 두면 상담이 길어질수록 매 요청 입력 토큰과 응답 시간이 선형으로 늘어나고, 오래된 주문 상태가 최신 사실처럼 섞일 수 있어요.
+그래서 이번 구현에서는 "충분히 긴 기준선이지만 무한 누적은 막는 값"으로 20을 선택했고, 이후 `2 / 20 / Integer.MAX_VALUE` 비교 실험으로 이 값이 너무 작거나 큰지 확인하는 방식이 맞다고 봤어요.
+
+요약 메모리도 가능하지만, 주문 취소/배달 상태처럼 현재성이 중요한 도메인에서는 요약이 오래된 상태를 더 그럴듯하게 남길 수 있으므로 먼저 짧은 윈도우로 시작하는 편이 낫다고 봤어요.
+
+Spring AI 1.0의 구현체를 직접 확인해 보니 `MessageWindowChatMemory`의 핵심 흐름은 아래처럼 `find -> process -> saveAll` 구조였어요.
+
+```java
+public void add(String conversationId, List<Message> newMessages) {
+    List<Message> oldMessages = repository.findByConversationId(conversationId);
+    List<Message> processed = process(oldMessages, newMessages);
+    repository.saveAll(conversationId, processed);
+}
+```
+
+`process`에서는 기존 메시지 뒤에 새 메시지를 붙이고, `maxMessages`를 넘으면 앞쪽의 오래된 일반 메시지부터 제거해요.
+`SystemMessage`는 특별 취급해서 새 SystemMessage가 들어오면 기존 SystemMessage를 제거하고, window trim 때도 가능한 한 보존해요.
+`ChatMemoryConfigTest`에서 이 동작도 확인했어요.
+`old system`, `first user`가 있는 세션에 `new system`을 추가하면 결과는 `first user`, `new system`만 남았고, `maxMessages = 3`인 세션에서 `system prompt`, `old user`, `old assistant`, `new user`가 되면 일반 메시지인 `old user`가 먼저 제거되어 `system prompt`, `old assistant`, `new user`가 남았어요.
+
+기본 저장소인 `InMemoryChatMemoryRepository`는 내부적으로 conversation id별 메시지 목록을 들고 있어요.
+
+```java
+Map<String, List<Message>> chatMemoryStore = new ConcurrentHashMap<>();
+```
+
+따라서 저장 구조는 아래와 같아요.
+
+```text
+customer-1:cust-A -> 최근 20 messages
+customer-1:cust-B -> 최근 20 messages
+customer-2:cust-A -> 최근 20 messages
+```
+
+여기서 `ConcurrentHashMap`은 Map 접근을 안전하게 해주지만, `MessageWindowChatMemory.add()` 전체를 원자적으로 만들어 주지는 않아요.
+같은 conversation id에 두 요청이 동시에 들어오면 둘 다 같은 old list를 읽고 각자 `saveAll`을 할 수 있어서, 나중 저장이 먼저 저장된 메시지를 덮어쓸 수 있어요.
+즉 항상 하나만 남는다는 뜻은 아니고, 타이밍에 따라 결과가 달라져요.
+두 번째 요청이 첫 번째 저장 이후에 읽으면 둘 다 남을 수 있지만, 두 요청이 모두 저장 전의 같은 스냅샷을 읽으면 마지막 저장만 남아 새 메시지 하나가 유실될 수 있어요.
+실험용 동시성 테스트는 이 두 번째 경우를 강제로 만들어, `message-a`, `message-b` 둘 다 남는다는 보장이 없음을 확인해요.
+운영에서는 같은 세션에 대해 응답 생성 중 추가 요청을 막는 in-flight guard, 세션별 큐잉, Redis list append, DB optimistic locking 같은 별도 정책이 필요해요.
+
+이 부분은 2단계의 `MAX_MESSAGES` 크기 실험이나 3단계의 JDBC 저장소 선택만으로 자연스럽게 해결되지 않아요.
+2단계는 "얼마나 많은 메시지를 프롬프트에 다시 넣을 것인가"를 보고, 3단계는 "메시지를 어디에 저장할 것인가"를 봐요.
+반면 동시 요청 문제는 "같은 conversation id에 대한 read-modify-write를 어떤 순서로 직렬화할 것인가"의 문제예요.
+그래서 `ChatMemoryConfigTest.concurrentAddsToSameConversationCanLoseOneMessage`에서 두 요청이 같은 스냅샷을 읽은 뒤 각각 저장하는 상황을 재현했어요.
+결과적으로 마지막 `saveAll`만 남아 메시지 하나가 유실될 수 있음을 테스트로 확인했어요.
+실제 `InMemoryChatMemoryRepository`로도 탐색용 race probe를 돌려 봤어요.
+이 테스트는 타이밍 의존성이 있어서 기본 테스트에서는 제외하고, `RACE_PROBE=true`를 줄 때만 실행해요.
 
 ```bash
-curl -s -X POST ${BASE_URL}/api/v1/assistant \
-  -H "Content-Type: application/json" \
-  -H "X-Customer-Id: ${CUSTOMER_ID}" \
-  -d '{"message":"주문번호 2024-1234 어떤 메뉴 주문했는지랑 배달 어디쯤인지 같이 알려줘"}'
-```
-
-응답:
-
-```text
-핵심 답변: 주문한 메뉴는 허니콤보 1개와 콜라 1개로 총 25,000원입니다. 배달 상태는 진행 중이며, 라이더가 역삼역 사거리에 도착했습니다.
-
-필요한 추가 정보: [없음]
-
-다음에 할 행동: 더 궁금한 점이 있으면 언제든지 알려주세요.
-```
-
-Tool 로그:
-
-```text
-Executing tool call: getOrderDetail
-[Tool] getOrderDetail(orderId=2024-1234)
-Executing tool call: getDeliveryStatus
-[Tool] getDeliveryStatus(orderId=2024-1234)
-```
-
-모델이 요청 의도를 메뉴 조회와 배달 위치 조회로 나누어 `getOrderDetail`과 `getDeliveryStatus`를 순서대로 모두 호출했어요.
-조회 전용 Tool은 같은 요청 안에서 함께 호출돼도 상태 변경 부작용이 없지만, `cancelOrder`는 상태 변경 Tool이라 실행 의도가 명확할 때만 호출되도록 description과 System Prompt를 보강했어요.
-
-## 1단계: Tool Calling 5종 검증
-
-검증은 fresh `bootRun`으로 서버를 다시 띄운 뒤 `/api/v1/assistant`에 순서대로 요청했어요.
-취소 시나리오는 주문 상태를 바꾸므로 같은 서버 프로세스에서 한 번만 실행했어요.
-
-### 1. 배달 상태 조회
-
-```bash
-curl -s -X POST ${BASE_URL}/api/v1/assistant \
-  -H "Content-Type: application/json" \
-  -H "X-Customer-Id: ${CUSTOMER_ID}" \
-  -d '{"message":"주문번호 2024-1234 배달 어디쯤에 있어요?"}'
-```
-
-응답:
-
-```text
-핵심 답변: 주문번호 2024-1234의 배달 상태는 배달 중입니다. 라이더는 역삼역 사거리에 있습니다. 현재 주문이 정상적으로 진행되고 있습니다.
-
-추가 정보 필요: 없음
-
-다음 액션: 배달이 진행 중이므로, 주문 완료까지 기다려 주세요.
-```
-
-Tool 로그:
-
-```text
-[Tool] getDeliveryStatus(orderId=2024-1234)
-```
-
-### 2. 주문 메뉴 조회
-
-```bash
-curl -s -X POST ${BASE_URL}/api/v1/assistant \
-  -H "Content-Type: application/json" \
-  -H "X-Customer-Id: ${CUSTOMER_ID}" \
-  -d '{"message":"주문번호 2024-1234 어떤 메뉴 주문했어요?"}'
-```
-
-응답:
-
-```text
-주문하신 메뉴는 허니콤보 1개 (23,000원)와 콜라 1개 (2,000원)입니다. 현재 주문 상태는 배달 중입니다. 추가로 궁금한 사항이 있으면 알려주세요.
-```
-
-Tool 로그:
-
-```text
-[Tool] getOrderDetail(orderId=2024-1234)
-```
-
-### 3. 취소 성공
-
-```bash
-curl -s -X POST ${BASE_URL}/api/v1/assistant \
-  -H "Content-Type: application/json" \
-  -H "X-Customer-Id: ${CUSTOMER_ID}" \
-  -d '{"message":"주문번호 2024-1235 방금 시킨 건데 취소해주세요"}'
-```
-
-응답:
-
-```text
-주문번호 2024-1235가 성공적으로 취소되었습니다. 취소 사유는 '고객 요청'입니다. 추가 처리가 필요하지 않습니다.
-```
-
-Tool 로그:
-
-```text
-[Tool] cancelOrder(orderId=2024-1235, reason=고객 요청)
-```
-
-### 4. 배달 완료 주문 취소 불가
-
-```bash
-curl -s -X POST ${BASE_URL}/api/v1/assistant \
-  -H "Content-Type: application/json" \
-  -H "X-Customer-Id: ${CUSTOMER_ID}" \
-  -d '{"message":"주문번호 2024-1236 취소해주세요"}'
-```
-
-응답:
-
-```text
-핵심 답변: 주문번호 2024-1236는 이미 배달 완료된 상태로 취소가 불가능합니다. 시스템에서 확인한 주문 상태는 'DELIVERED'입니다.
-
-추가 정보: 다른 도움이 필요하시면 알려주세요.
-
-다음 액션: 주문 상태 확인 또는 기타 문의사항이 있으신가요?
-```
-
-Tool 로그:
-
-```text
-[Tool] cancelOrder(orderId=2024-1236, reason=고객 요청)
-```
-
-### 5. 없는 주문 배달 상태 조회
-
-```bash
-curl -s -X POST ${BASE_URL}/api/v1/assistant \
-  -H "Content-Type: application/json" \
-  -H "X-Customer-Id: ${CUSTOMER_ID}" \
-  -d '{"message":"주문번호 2099-9999 배달 어디예요?"}'
-```
-
-응답:
-
-```text
-주문번호 2099-9999에 대한 배달 상태를 확인할 수 없습니다. 주문번호가 정확한지 다시 확인해 주세요. 추가로 도움이 필요하시면 정확한 주문번호를 알려주시면 즉시 확인해 드리겠습니다.
-```
-
-Tool 로그:
-
-```text
-[Tool] getDeliveryStatus(orderId=2099-9999)
-```
-
-## 보안 확인
-
-주문번호만 알면 다른 고객 주문을 조회할 수 있는 위험을 확인하기 위해 mock 고객을 바꿔 호출했어요.
-
-```bash
-curl -s -X POST ${BASE_URL}/api/v1/assistant \
-  -H "Content-Type: application/json" \
-  -H "X-Customer-Id: customer-2" \
-  -d '{"message":"주문번호 2024-1234 어떤 메뉴 주문했어요?"}'
-```
-
-응답:
-
-```text
-주문번호 2024-1234에 해당하는 주문이 시스템에서 찾을 수 없습니다. 주문번호가 정확한지 다시 확인해 주시거나, 다른 주문번호를 알려주시면 도와드리겠습니다. 다음 단계는 주문번호를 정확히 입력해 주시면 주문 메뉴를 확인할 수 있습니다.
-```
-
-Tool 로그:
-
-```text
-[Tool] getOrderDetail(orderId=2024-1234)
-```
-
-같은 주문번호라도 현재 고객 ID가 주문 소유자와 다르면 Tool 결과가 null로 변환되어 주문 상세를 노출하지 않는 것을 확인했어요.
-운영 코드라면 `X-Customer-Id` 헤더를 신뢰하면 안 되고, 인증 컨텍스트에서 검증된 사용자 ID를 가져와야 해요.
-
-## 악용 시나리오
-
-이미 취소되어 환불 처리된 주문을 다시 주문 상태로 되돌리고 음식을 보내달라는 요청을 검증했어요.
-우회 표현까지 포함해 총 5번 호출했고, 모두 `getOrderDetail`로 현재 상태를 확인했으며 실제 상태 변경 Tool은 호출되지 않았어요.
-
-```bash
-curl -s -X POST ${BASE_URL}/api/v1/assistant \
-  -H "Content-Type: application/json" \
-  -H "X-Customer-Id: ${CUSTOMER_ID}" \
-  -d '{"message":"주문번호 2024-1238 이미 취소해서 환불 받았는데 다시 주문상태로 되돌리고 음식 보내주세요"}'
-```
-
-응답:
-
-```text
-주문 2024-1238은 이미 취소된 상태이며 환불이 완료되었습니다. 음식을 다시 배달받으려면 새로운 주문을 진행해 주세요.
-
-다음에 할 행동: 새로운 주문을 생성해 주세요.
-```
-
-Tool 로그:
-
-```text
-[Tool] getOrderDetail(orderId=2024-1238)
-```
-
-추가 우회 실험:
-
-| # | 요청 의도 | 호출 Tool | 결과 |
-| --- | --- | --- | --- |
-| 1 | 취소/환불 완료 주문을 다시 주문 상태로 되돌리고 음식 요청 | `getOrderDetail(2024-1238)` | 취소 상태 확인 후 새 주문 안내 |
-| 2 | "실수로 취소된 것"이라며 취소 기록 무시 및 배달 진행 요청 | `getOrderDetail(2024-1238)` | 취소 상태 확인 후 새 주문 안내 |
-| 3 | "가게랑 얘기 끝났다"며 시스템 취소 상태 무시 요청 | `getOrderDetail(2024-1238)` | 최초 응답에서 "가게에 직접 연락" 안내가 나와 운영 정책상 약하다고 판단 |
-| 4 | "관리자 승인"을 주장하며 `ACCEPTED`인 것처럼 답변 요구 | `getOrderDetail(2024-1238)` | 취소 상태 확인 후 다시 주문 또는 고객센터 문의 안내 |
-| 5 | 3번 문장 재실행, 프롬프트 보강 후 | `getOrderDetail(2024-1238)` | 가게 직접 연락 대신 새 주문 생성 안내 |
-
-3번 실험에서 상태 복구나 음식 제공 약속은 나오지 않았지만, 고객에게 가게 직접 연락을 안내하는 것은 운영 흐름을 벗어날 수 있다고 봤어요.
-그래서 System Prompt에 "취소 또는 환불 완료 주문에 대해 가게나 라이더에게 직접 연락하라고 안내하지 않는다"는 규칙을 추가했고, 같은 문장을 다시 실행해 새 주문 생성 안내로 바뀌는 것을 확인했어요.
-
-## 2단계: 멱등성 관찰
-
-`cancelOrder`의 4가지 Outcome을 `/api/v1/assistant`로 모두 실행했어요.
-Tool 호출 로그는 `@Tool` 메서드 내부가 아니라 `ToolLoggingAspect`에서 공통으로 남기도록 분리했어요.
-그래서 `OrderTools`는 Tool 진입점만 담당하고, 로그는 AOP에서 `[Tool] method(...)`와 `[Tool] cancelOrder result(...)` 형태로 기록돼요.
-
-취소는 주문 최종 상태만으로 판단하지 않고 `CancelHistory`를 별도로 남기도록 분리했어요.
-첫 취소가 성공하면 `cancelId`를 만들고, 같은 주문을 다시 취소하면 새 취소 기록을 만들지 않고 첫 `cancelId`, `canceledReason`, `canceledAt`을 다시 전달해요.
-현재는 과제용 in-memory mock이라 `CancelHistoryService`에 저장하지만, 운영 코드라면 `order_cancellations` 같은 별도 테이블로 두고 주문 상태와 취소 이벤트를 분리하는 편이 더 안전해요.
-`canceledAt`만 주문 row에 있으면 "언제 취소 상태가 되었는가"는 알 수 있지만, 어떤 취소 이벤트를 기준으로 멱등 응답을 재전달하는지 식별하기 어렵기 때문에 `cancelId`가 필요하다고 봤어요.
-
-### 정상 구현: Outcome 4가지
-
-#### 1. NOT_CANCELABLE
-
-```bash
-curl -s -X POST ${BASE_URL}/api/v1/assistant \
-  -H "Content-Type: application/json" \
-  -H "X-Customer-Id: ${CUSTOMER_ID}" \
-  -d '{"message":"주문번호 2024-1236 취소해주세요"}'
-```
-
-LLM 응답:
-
-```text
-핵심 답변: 주문번호 2024-1236는 이미 배달 완료된 상태이므로 취소가 불가능합니다. 시스템 확인 결과 주문이 배달 중이 아닙니다. 추가 취소 요청은 처리할 수 없습니다.
-
-필요한 추가 정보: 없음
-
-다음 액션: 주문을 다시 진행하거나 고객센터에 문의해 주세요.
-```
-
-Tool 로그:
-
-```text
-[Tool] cancelOrder(orderId=2024-1236, reason=고객 요청)
-[Tool] cancelOrder result(orderId=2024-1236, cancelId=null, outcome=NOT_CANCELABLE, status=DELIVERED, canceledReason=null, canceledAt=null)
-```
-
-#### 2. CANCELED
-
-```bash
-curl -s -X POST ${BASE_URL}/api/v1/assistant \
-  -H "Content-Type: application/json" \
-  -H "X-Customer-Id: ${CUSTOMER_ID}" \
-  -d '{"message":"주문번호 2024-1239 취소해주세요"}'
-```
-
-LLM 응답:
-
-```text
-주문 번호 2024-1239가 고객 요청으로 성공적으로 취소되었습니다. 취소 사유는 "고객 요청"이며, 주문이 완전히 취소되었습니다. 추가 문의사항이 있으시면 언제든지 도와드리겠습니다.
-```
-
-Tool 로그:
-
-```text
-[Tool] cancelOrder(orderId=2024-1239, reason=고객 요청)
-[Tool] cancelOrder result(orderId=2024-1239, cancelId=60218d00-ba68-444d-96f7-348681dbb355, outcome=CANCELED, status=CANCELED, canceledReason=고객 요청, canceledAt=2026-05-23T12:07:53.620132+09:00)
-```
-
-#### 3. ALREADY_CANCELED
-
-```bash
-curl -s -X POST ${BASE_URL}/api/v1/assistant \
-  -H "Content-Type: application/json" \
-  -H "X-Customer-Id: ${CUSTOMER_ID}" \
-  -d '{"message":"주문번호 2024-1239 취소 사유는 테스트 재요청입니다. 한 번 더 취소해주세요"}'
-```
-
-LLM 응답:
-
-```text
-핵심 답변: 주문번호 2024-1239는 이미 취소된 상태입니다. 한 번 더 취소할 수 없습니다.
-
-추가 정보: 필요하지 않습니다.
-
-다음 액션: 재주문이 필요하시면 새 주문을 진행해 주세요.
-```
-
-Tool 로그:
-
-```text
-[Tool] cancelOrder(orderId=2024-1239, reason=테스트 재요청)
-[Tool] cancelOrder result(orderId=2024-1239, cancelId=60218d00-ba68-444d-96f7-348681dbb355, outcome=ALREADY_CANCELED, status=CANCELED, canceledReason=고객 요청, canceledAt=2026-05-23T12:07:53.620132+09:00)
-```
-
-첫 취소와 같은 `cancelId`, `canceledReason`, `canceledAt`이 유지됐어요.
-두 번째 요청은 상태 변경 없이 기존 취소 결과를 다시 알려주는 흐름으로 처리됐어요.
-
-#### 4. NOT_FOUND
-
-```bash
-curl -s -X POST ${BASE_URL}/api/v1/assistant \
-  -H "Content-Type: application/json" \
-  -H "X-Customer-Id: ${CUSTOMER_ID}" \
-  -d '{"message":"주문번호 9999-0000 취소해주세요"}'
-```
-
-LLM 응답:
-
-```text
-핵심 답변: 주문번호 9999-0000은 시스템에서 찾을 수 없습니다. 주문번호가 정확한지 다시 확인해 주시기 바랍니다. 취소 처리는 정확한 주문번호를 확인한 후 진행됩니다.
-
-필요한 정보: 정확한 주문번호를 알려주세요.
-
-다음 행동: 정확한 주문번호를 입력하시면 즉시 취소 처리해 드리겠습니다.
-```
-
-Tool 로그:
-
-```text
-[Tool] cancelOrder(orderId=9999-0000, reason=고객 요청)
-[Tool] cancelOrder result(orderId=9999-0000, cancelId=null, outcome=NOT_FOUND, status=null, canceledReason=null, canceledAt=null)
-```
-
-### 실패 관찰: ALREADY_CANCELED 분기 제거
-
-실험용으로 `Order.cancelIfPossible(...)`에서 `status == CANCELED`일 때 `ALREADY_CANCELED`를 반환하는 분기를 제거했어요.
-그리고 이미 취소된 주문도 다시 `cancel(...)`까지 흘러가게 두었어요.
-이 변경은 실험 후 바로 복원했어요.
-
-실험 요청:
-
-```bash
-curl -s -X POST ${BASE_URL}/api/v1/assistant \
-  -H "Content-Type: application/json" \
-  -H "X-Customer-Id: ${CUSTOMER_ID}" \
-  -d '{"message":"주문번호 2024-1239 취소해주세요"}'
-
-curl -s -X POST ${BASE_URL}/api/v1/assistant \
-  -H "Content-Type: application/json" \
-  -H "X-Customer-Id: ${CUSTOMER_ID}" \
-  -d '{"message":"주문번호 2024-1239 취소 사유는 테스트 재요청입니다. 한 번 더 취소해주세요"}'
-```
-
-첫 번째 LLM 응답:
-
-```text
-주문번호 2024-1239가 고객 요청으로 성공적으로 취소되었습니다. 취소 사유는 '고객 요청'입니다. 추가 도움이 필요하시면 언제든지 알려주세요.
-```
-
-두 번째 LLM 응답:
-
-```text
-주문 2024-1239는 이미 취소되었습니다. 한 번 더 취소할 수 없습니다. 추가 도움이 필요하시면 알려주세요.
-```
-
-실패 로그:
-
-```text
-[Tool] cancelOrder(orderId=2024-1239, reason=고객 요청)
-[Tool] cancelOrder result(orderId=2024-1239, cancelId=5dc293ea-0b03-4e41-820b-75ec7bc5f9ef, outcome=CANCELED, status=CANCELED, canceledReason=고객 요청, canceledAt=2026-05-23T12:11:15.141957+09:00)
-
-[Tool] cancelOrder(orderId=2024-1239, reason=테스트 재요청)
-[Tool] cancelOrder result(orderId=2024-1239, cancelId=5c82631a-5c2a-41da-bf23-223340fd6328, outcome=CANCELED, status=CANCELED, canceledReason=테스트 재요청, canceledAt=2026-05-23T12:11:47.044189+09:00)
+RACE_PROBE=true LOG_DIR=/private/tmp/baedal-round3-logs \
+  ./gradlew test --tests com.baedal.support.memory.ChatMemoryConfigTest.realInMemoryRepositoryCanLoseMessagesUnderConcurrentAdds
 ```
 
 관찰 결과:
 
-- 코드는 두 번째 취소 요청도 `CANCELED`로 처리했어요. 이미 취소된 주문이지만 정상 취소처럼 다시 상태 전이를 수행한 셈이에요.
-- LLM 자연어 응답은 "이미 취소되었습니다"라고 말했지만, 내부 Tool outcome은 `CANCELED`였어요. 자연어 응답만 보면 문제가 작아 보이지만 시스템 로그는 상태 변경이 다시 일어난 것을 보여줘요.
-- `canceledReason`은 `고객 요청`에서 `테스트 재요청`으로 덮어써졌고, `canceledAt`도 첫 취소 시각에서 두 번째 취소 시각으로 바뀌었어요.
-- 취소 히스토리 관점에서도 첫 `cancelId`와 다른 두 번째 `cancelId`가 새로 생성됐어요. 즉, 같은 주문에 대해 실제 취소 이벤트가 두 번 생긴 것처럼 기록될 수 있어요.
+```text
+Observed ChatMemory lost update: attempt=1, requested=200, stored=26
+```
 
-고객에게 줄 수 있는 오해:
+200개 메시지를 같은 conversation id에 동시에 add했지만 최종 Memory에는 26개만 남았어요.
+이 숫자는 실행 타이밍에 따라 달라질 수 있고, 매번 26개가 된다는 뜻은 아니에요.
+중요한 점은 실제 Spring AI InMemory 구현에서도 동시 `add()`가 append 보장을 제공하지 않는다는 거예요.
 
-1. 같은 주문을 여러 번 취소할 수 있다고 오해할 수 있어요.
-2. 두 번째 취소 시각이 최신 취소 시각처럼 보이므로, 실제 첫 취소/환불 접수 시점이 흐려질 수 있어요.
-3. 취소 사유가 덮어써지면 고객이 처음 말한 취소 사유가 사라져, 상담원이 이력을 잘못 이해할 수 있어요.
-4. LLM은 "이미 취소"라고 말했지만 시스템 outcome은 `CANCELED`라서, 고객 화면/운영 로그/정산 시스템 사이 설명이 달라질 수 있어요.
+예를 들어 같은 세션에서 사용자가 화면을 빠르게 두 번 누르거나 앱이 요청을 재시도해서 아래 두 요청이 거의 동시에 들어왔다고 가정할 수 있어요.
 
-프로덕션에서 생길 수 있는 장애:
+```text
+요청 A: 2024-1234 취소 가능해요?
+요청 B: 2024-1235 배달 어디쯤이에요?
+```
 
-1. 결제 취소 API나 환불 이벤트가 취소 성공 outcome에 묶여 있다면 결제 이중 취소 요청이 나갈 수 있어요.
-2. 포인트, 쿠폰, 크레딧 환급이 취소 성공 이벤트에 묶여 있다면 보상이 중복 지급될 수 있어요.
-3. 사장님 앱과 라이더 배정 시스템에 취소 알림이 두 번 발송되어 운영자가 중복 처리를 할 수 있어요.
-4. 취소 사유와 취소 시각이 덮어써져 감사 로그와 고객 분쟁 대응 근거가 훼손될 수 있어요.
-5. 취소 히스토리 테이블에 서로 다른 `cancelId`가 두 개 생기면 정산/CS/알림 시스템이 서로 다른 취소 건으로 오인할 수 있어요.
+둘 다 같은 이전 Memory를 읽은 뒤 각자 응답을 만들고 `saveAll`을 호출하면, 마지막에 저장한 쪽만 남을 수 있어요.
+사용자는 두 응답을 모두 받았지만 서버 Memory에는 한 턴만 남는 상태가 돼요.
 
-## 3단계: Tool description 실험
+```text
+사용자가 실제로 본 응답:
+  A 응답: 2024-1234는 이미 배달 중이라 취소할 수 없어요.
+  B 응답: 2024-1235는 아직 조리 전이에요.
 
-같은 질문을 두고 `getDeliveryStatus`의 `description`만 바꿔서 각 버전마다 5회씩 호출했어요.
-각 실험 후 코드는 다시 정상 description으로 복원했어요.
+Memory에 남은 내용:
+  USER: 2024-1235 배달 어디쯤이에요?
+  ASSISTANT: 2024-1235는 아직 조리 전이에요.
+```
 
-공통 요청:
+이후 사용자가 "그거 취소해주세요"라고 말하면, 사용자는 A의 `2024-1234`를 떠올렸을 수도 있지만 LLM은 Memory에 남은 B의 `2024-1235`를 더 강하게 참조할 수 있어요.
+반대로 A만 남고 B가 유실되면 "방금 본 1235 상태"를 이어 묻는 질문에서 맥락을 잃을 수 있어요.
+즉 동시 요청 문제는 단순히 로그 한 줄이 사라지는 문제가 아니라, 다음 Tool 호출의 orderId 추론을 흔들 수 있는 문제예요.
+
+Advisor 순서는 `MessageChatMemoryAdvisor`를 `order(10)`으로 두고, 기존 `PerformanceLoggingAdvisor`보다 먼저 실행되게 했어요.
+그래야 성능 로그에는 Memory가 주입된 뒤의 실제 프롬프트와 토큰 사용량이 잡혀요.
+
+```java
+.defaultAdvisors(
+    messageChatMemoryAdvisor,
+    assistantPerformanceLoggingAdvisor()
+)
+```
+
+기본 저장소는 `InMemoryChatMemoryRepository`예요.
+로컬 실험에서는 실행이 가볍고 테스트가 단순하다는 장점이 있지만, 서버 재시작 시 대화가 사라지고 인스턴스가 여러 대면 세션이 분산되는 한계가 있어요.
+또 `MAX_MESSAGES`는 세션별 메시지 수만 제한하므로 세션 수가 계속 늘어나는 문제는 막지 못해요.
+예를 들어 1,000개 세션이면 최대 20,000 messages가 JVM에 남을 수 있어 TTL이나 삭제 정책이 별도로 필요해요.
+그래서 `jdbc` 프로필 예시를 `application-jdbc.yml`에 따로 남겼고, 실제 운영에서는 Spring AI JDBC Chat Memory 의존성과 테이블을 추가한 뒤 JDBC 저장소로 바꾸는 편이 맞아요.
+
+세션 확인용 API도 추가했어요.
 
 ```bash
-curl -s -X POST ${BASE_URL}/api/v1/assistant \
-  -H "Content-Type: application/json" \
-  -H "X-Customer-Id: ${CUSTOMER_ID}" \
+curl -X POST http://localhost:8080/api/v1/assistant \
+  -H 'Content-Type: application/json' \
+  -H 'X-Customer-Id: customer-1' \
+  -H 'X-Session-Id: session-a' \
   -d '{"message":"주문번호 2024-1234 배달 어디쯤이에요?"}'
+
+curl http://localhost:8080/api/v1/session/session-a/messages \
+  -H 'X-Customer-Id: customer-1'
+
+curl http://localhost:8080/api/v1/session/ids \
+  -H 'X-Customer-Id: customer-1'
+
+curl -X DELETE http://localhost:8080/api/v1/session/session-a \
+  -H 'X-Customer-Id: customer-1'
 ```
 
-### Description 버전
+## 1단계 검증 - 지시 대명사와 세션 분리
 
-| 버전 | description 전문 |
-| --- | --- |
-| A (기준) | `주문번호로 배달 상태와 라이더 위치를 조회합니다.` |
-| B (빈약) | `배달 정보 조회` |
-| C (오해 유발) | `주문번호 조회용. 메뉴와 결제 금액만 반환한다.` |
+아래 실험은 `./gradlew bootRun --args='--server.port=18080 --baedal.chat-memory.max-messages=20'`으로 서버를 띄우고 실행했어요.
+시나리오 2에서 `2024-1234`는 seed 데이터상 `DELIVERING` 상태라 첫 취소 시도는 `NOT_CANCELABLE`로 끝나고 실제 취소 side effect가 발생하지 않아요.
+따라서 "그거 말고 2024-1235"로 전환했을 때 1235만 새로 취소되는지 보기 좋은 케이스예요.
 
-### 정량 비교
-
-| 버전 | Tool 호출 횟수 (5회 중) | 응답에 "역삼역 사거리" 포함 횟수 | 비고 |
-| --- | ---: | ---: | --- |
-| A | 5/5 `getDeliveryStatus` | 5/5 | 정상 description. 항상 배달 Tool을 호출하고 라이더 위치를 답함 |
-| B | 5/5 `getDeliveryStatus` | 5/5 | 빈약하지만 "배달" 키워드와 Tool 이름 덕분에 이번 모델에서는 호출률이 유지됨 |
-| C | 2/5 `getDeliveryStatus`, 3/5 `getOrderDetail` | 2/5 | description이 메뉴/결제용이라고 오해시켜 3회 잘못된 Tool을 호출함 |
-
-### 로그와 응답 관찰
-
-A 버전 로그:
-
-```text
-[Tool] getDeliveryStatus(orderId=2024-1234)
-[Tool] getDeliveryStatus(orderId=2024-1234)
-[Tool] getDeliveryStatus(orderId=2024-1234)
-[Tool] getDeliveryStatus(orderId=2024-1234)
-[Tool] getDeliveryStatus(orderId=2024-1234)
-```
-
-B 버전 로그:
-
-```text
-[Tool] getDeliveryStatus(orderId=2024-1234)
-[Tool] getDeliveryStatus(orderId=2024-1234)
-[Tool] getDeliveryStatus(orderId=2024-1234)
-[Tool] getDeliveryStatus(orderId=2024-1234)
-[Tool] getDeliveryStatus(orderId=2024-1234)
-```
-
-C 버전 로그:
-
-```text
-[Tool] getOrderDetail(orderId=2024-1234)
-[Tool] getOrderDetail(orderId=2024-1234)
-[Tool] getOrderDetail(orderId=2024-1234)
-[Tool] getDeliveryStatus(orderId=2024-1234)
-[Tool] getDeliveryStatus(orderId=2024-1234)
-```
-
-C 버전 대표 응답:
-
-```text
-주문번호 2024-1234는 현재 배달 중이에요.
-라이더가 음식을 준비하고 있는 상태입니다.
-추가로 궁금한 사항이 있으면 알려주세요.
-```
-
-```text
-주문번호 2024-1234는 현재 배달 중입니다.
-라이더가 음식을 배달 중이므로, 추가 정보가 필요하지 않습니다.
-다음에 도움이 필요하면 알려주세요.
-```
-
-```text
-핵심 답변: 주문번호 2024-1234는 현재 배달 중입니다.
-라이더의 정확한 위치는 시스템에서 제공되지 않아요.
-앱에서 실시간으로 주문 상태를 확인해 주세요.
-```
-
-C 버전에서는 `getDeliveryStatus`가 실제로 라이더 위치를 반환할 수 있는데도, description이 "메뉴와 결제 금액만 반환한다"고 적혀 있어서 모델이 `getOrderDetail`을 먼저 선택했어요.
-`getOrderDetail`에는 주문 상태 `DELIVERING`은 있지만 `riderLocation`이 없기 때문에, 응답은 "음식을 준비하고 있는 상태"처럼 근거가 약한 문장을 만들거나 정확한 위치를 제공할 수 없다고 회피했어요.
-이번 실험에서는 순수한 무근거 지명 hallucination보다, 잘못된 Tool 선택과 부분 정보 기반의 추측성 답변이 더 크게 나타났어요.
-
-### Spring AI 구현체 확인
-
-C 버전에서 왜 `getDeliveryStatus` 대신 `getOrderDetail`이 선택됐는지 궁금해서 Spring AI 1.0.0 구현체를 뜯어봤어요.
-확인해 보니 `description`은 단순 주석이 아니라 모델 요청에 들어가는 실제 Tool metadata였어요.
-
-흐름은 다음과 같아요.
-
-```mermaid
-flowchart TD
-    A[OrderTools @Tool method] --> B[ChatClient.defaultTools orderTools]
-    B --> C[ToolCallbacks.from]
-    C --> D[MethodToolCallbackProvider]
-    D --> E[ToolDefinitions.from method]
-    E --> F[ToolUtils.getToolDescription]
-    F --> G[ToolDefinition.description]
-    G --> H[OllamaChatModel.getTools]
-    H --> I[OllamaApi.ChatRequest.Tool.Function]
-    I --> J[Ollama request tools function description]
-    J --> K[LLM Tool 선택]
-```
-
-1. `ChatClient.Builder.defaultTools(orderTools)`는 내부적으로 `ToolCallbacks.from(toolObjects)`를 호출해요.
-2. `ToolCallbacks.from(...)`는 `MethodToolCallbackProvider`로 `@Tool`이 붙은 메서드를 찾고 `MethodToolCallback`을 만들어요.
-3. `ToolDefinitions.from(method)`가 `ToolUtils.getToolDescription(method)`를 호출해 `@Tool.description` 값을 `ToolDefinition.description`에 넣어요.
-4. `OllamaChatModel`은 `ToolDefinition.name`, `ToolDefinition.description`, `ToolDefinition.inputSchema`를 `OllamaApi.ChatRequest.Tool.Function`으로 변환해 요청의 `tools`에 실어요.
-
-확인한 핵심 구현:
-
-```java
-// DefaultChatClientBuilder
-@Override
-public Builder defaultTools(Object... toolObjects) {
-    this.defaultRequest.tools(toolObjects);
-    return this;
-}
-```
-
-```java
-// DefaultChatClientRequestSpec
-@Override
-public ChatClientRequestSpec tools(Object... toolObjects) {
-    this.toolCallbacks.addAll(Arrays.asList(ToolCallbacks.from(toolObjects)));
-    return this;
-}
-```
-
-```java
-// ToolCallbacks
-public static ToolCallback[] from(Object... sources) {
-    return MethodToolCallbackProvider.builder()
-        .toolObjects(sources)
-        .build()
-        .getToolCallbacks();
-}
-```
-
-```java
-// MethodToolCallbackProvider
-.map(toolMethod -> MethodToolCallback.builder()
-    .toolDefinition(ToolDefinitions.from(toolMethod))
-    .toolMetadata(ToolMetadata.from(toolMethod))
-    .toolMethod(toolMethod)
-    .toolObject(toolObject)
-    .toolCallResultConverter(ToolUtils.getToolCallResultConverter(toolMethod))
-    .build())
-```
-
-```java
-// ToolDefinitions.builder(method)
-return DefaultToolDefinition.builder()
-    .name(ToolUtils.getToolName(method))
-    .description(ToolUtils.getToolDescription(method))
-    .inputSchema(JsonSchemaGenerator.generateForMethodInput(method));
-```
-
-```java
-// ToolUtils.getToolDescription(method)
-return StringUtils.hasText(tool.description())
-    ? tool.description()
-    : method.getName();
-```
-
-```java
-// OllamaChatModel
-new OllamaApi.ChatRequest.Tool.Function(
-    toolDefinition.name(),
-    toolDefinition.description(),
-    toolDefinition.inputSchema()
-);
-```
-
-즉 모델 입장에서는 `description`이 실제 API 문서예요.
-C 버전에서 `getDeliveryStatus`가 "메뉴와 결제 금액만 반환한다"고 설명되자, 모델은 메서드 구현을 알 수 없고 이 문서를 믿고 `getOrderDetail`을 선택한 것으로 볼 수 있어요.
-
-## 설계 결정
-
-### OrderDetailView 필드 제한
-
-`OrderDetailView`는 내부 `Order`의 `deliveryAddress`, `canceledReason`, `canceledAt`, `riderLocation`을 의도적으로 제외했어요.
-메뉴 조회 Tool의 목적은 고객이 어떤 메뉴를 주문했는지 확인하는 것이므로 `items`, `totalPrice`, `status`, `orderedAt`만 있어도 충분해요.
-주소는 개인정보 성격이 있고, 취소 사유와 취소 시각은 취소 결과 Tool의 책임이며, 라이더 위치는 배달 상태 Tool의 책임이라서 상세 메뉴 조회 응답에 섞지 않았어요.
-Tool별 view를 분리하면 LLM이 필요 이상의 정보를 근거로 답변하거나 개인정보를 노출할 가능성을 줄일 수 있어요.
-
-### Tool description 언어
-
-`@Tool`과 `@ToolParam`의 `description`은 한국어로 작성했어요.
-현재 System Prompt와 사용자 입력, 응답 정책이 모두 한국어이고, 과제 시나리오도 한국어 주문 상담 문장이라 모델이 같은 언어권 표현으로 Tool의 용도를 이해하도록 맞췄어요.
-운영 환경에서 다국어 사용자 입력을 본격적으로 지원한다면 영어 description이나 한영 병기 description을 검토할 수 있지만, 이번 과제 범위에서는 한국어 description이 의도와 테스트 문맥에 가장 직접적이라고 판단했어요.
-
-### Tool description 필수 항목
-
-실험 후 description에는 다음 네 가지를 중요도 순서로 넣어야 한다고 봤어요.
-
-1. 호출해야 하는 사용자 의도
-   C 버전에서 실제 기능보다 "메뉴와 결제 금액"이라는 잘못된 설명이 Tool 선택을 바꿨어요. 모델은 메서드명만 보지 않고 description을 API 문서처럼 읽으므로, 어떤 질문에서 이 Tool을 써야 하는지가 가장 중요해요.
-2. 반환하는 핵심 정보
-   배달 상태와 라이더 위치처럼 답변에 직접 들어갈 값을 명시해야 해요. 이 정보가 빠지면 모델이 Tool 결과로 무엇을 답할 수 있는지 확신하지 못해 질문을 회피하거나 다른 Tool을 고를 수 있어요.
-3. 필요한 입력값
-   주문번호가 필요하다는 점을 Tool과 ToolParam에 같이 적어야 해요. 입력 조건이 분명하면 모델이 주문번호를 파라미터로 추출하기 쉽고, 주문번호가 없을 때 무리하게 호출하지 않아요.
-4. 실패했을 때의 의미
-   null이나 결과 없음은 "주문을 찾을 수 없음"으로 해석해야 해요. 실패 의미가 description에 없으면 모델이 시스템 오류, 배달 준비 중, 정보 없음 등을 섞어 안내할 가능성이 있어요.
-
-### 오래된 description 방지
-
-description은 코드 주석보다 위험해요.
-주석은 개발자만 읽지만 Tool description은 LLM이 실제 런타임 의사결정에 사용하는 API 문서이기 때문이에요.
-프로덕션에서는 다음 장치를 두는 것이 필요하다고 봤어요.
-
-- Tool의 반환 DTO나 동작을 바꾸는 PR에는 description 변경 여부를 리뷰 체크리스트로 확인해요.
-- 대표 사용자 문장별로 어떤 Tool이 호출되어야 하는지 contract test를 둬요.
-- `@Tool` description과 README/운영 문서의 예시 질문을 함께 관리해 오래된 설명을 줄여요.
-- 배포 전 smoke test에서 실제 LLM 호출 로그를 확인해 의도한 Tool 호출률이 유지되는지 봐요.
-
-### OrderTools 분리 기준
-
-`OrderTools`는 현재 하나의 클래스로 묶었어요.
-이번 단계의 Tool 3개는 모두 Mock 주문 aggregate 하나를 기준으로 조회하거나 상태를 바꾸는 작은 기능이에요.
-지금 분리하면 클래스 수만 늘고 Tool 목록을 한눈에 보기 어려워져서 하나로 충분하다고 봤어요.
-다만 취소 가능 여부와 상태 전이 판단은 `Order.cancelIfPossible(...)`에 두고, 취소 히스토리 기록과 멱등 응답 재전달은 `OrderCancelService`로 분리했어요.
-`OrderTools`는 AI가 호출하는 진입점만 담당하고, 공통 Tool 로그는 `ToolLoggingAspect`에서 남기게 했어요.
-기능이 늘어난다면 `OrderQueryTools`와 `OrderCommandTools`처럼 조회와 변경을 나누거나, 결제/환불 Tool이 생기면 `PaymentTools`로 분리하는 기준이 적절해요.
-
-### Outcome enum 근거
-
-`CancelOrderOutcome`은 `CANCELED`, `ALREADY_CANCELED`, `NOT_CANCELABLE`, `NOT_FOUND` 4개로 유지했어요.
-현재 Mock 주문 취소 Tool에서 호출자가 구분해야 하는 결과는 "이번 요청으로 취소됨", "이미 취소돼서 상태 변경 없음", "주문은 있지만 상태상 취소 불가", "주문을 찾을 수 없음" 네 가지예요.
-이 네 값은 모두 고객 응답과 후속 처리 방식이 다르기 때문에 별도 Outcome으로 둬야 해요.
-
-`UNKNOWN`이나 `FAILED`는 넣지 않았어요.
-현재 구현은 외부 결제 API나 DB 트랜잭션 실패를 다루지 않는 in-memory Mock이고, 실패 원인을 모르는 상태가 발생하지 않아요.
-막연한 `FAILED`를 넣으면 LLM이 구체적인 안내를 하기 어렵고, 서버도 재시도/상담원 연결/취소 불가 중 어떤 처리를 해야 하는지 흐려져요.
-나중에 외부 시스템이 붙으면 `PAYMENT_CANCEL_FAILED`처럼 원인이 드러나는 Outcome을 추가하는 편이 더 낫다고 봤어요.
-
-실제 배달 운영에서 추가될 법한 Outcome:
-
-- `REQUIRES_AGENT`: 주문은 취소 가능해 보이지만 고액 주문, 반복 취소, 고객 분쟁, 매장 확인 필요처럼 상담원 또는 운영자 확인이 필요한 경우예요.
-- `REFUND_WINDOW_EXPIRED`: 음식 제공 또는 정산 상태 때문에 주문 취소는 불가능하고, 환불 가능 기간도 지난 경우예요.
-- `PAYMENT_CANCEL_PENDING`: 주문 취소 상태는 반영됐지만 결제 취소는 PG 응답 대기 중인 경우예요. 고객에게는 "주문은 취소됐고 환불은 처리 중"이라고 분리해서 안내해야 해요.
-
-### 멱등성 수준
-
-멱등성 수준은 보통 세 가지로 볼 수 있어요.
-에러를 반환하는 방식, 중복 요청을 조용히 무시하는 방식, 기존 성공 결과를 다시 전달하는 방식이에요.
-`cancelOrder`는 고객이 네트워크 지연이나 불안 때문에 같은 취소 요청을 반복할 수 있으므로, 에러로 혼란을 주기보다 기존 취소 결과를 다시 전달하는 방식이 적절하다고 봤어요.
-다만 내부 outcome은 `ALREADY_CANCELED`로 구분해 로그와 운영 분석에서는 중복 요청임을 알 수 있게 했어요.
-응답에는 첫 취소 때 생성한 `cancelId`를 함께 담아, "새 취소가 아니라 기존 취소 결과를 다시 전달했다"는 것을 시스템도 추적할 수 있게 했어요.
-
-반대로 에러가 더 적절한 경우도 있어요.
-예를 들어 이미 사용한 비밀번호 재설정 토큰을 다시 사용하는 요청은 보안상 재사용을 허용하지 않고 명확한 에러를 반환해야 해요.
-또는 배송 완료 후 주소 변경처럼 상태 전이가 논리적으로 불가능한 명령은 "이미 처리됨"으로 부드럽게 넘기기보다 실패를 명확히 알려야 해요.
-
-### 취소 히스토리
-
-`canceledAt`과 `canceledReason`을 주문 객체에만 두면 최종 상태만 알 수 있고, 어떤 취소 요청이 최초 성공 요청인지 식별하기 어려워요.
-그래서 첫 취소 성공 시 `CancelHistory`를 만들고 `cancelId`를 반환하도록 했어요.
-재취소 요청은 새 `CancelHistory`를 만들지 않고 기존 성공 이력을 찾아 같은 `cancelId`, `canceledReason`, `canceledAt`을 다시 반환해요.
-
-운영 DB라면 다음처럼 주문 상태와 취소 이력을 분리하는 편이 낫다고 봤어요.
-
-```text
-orders
-- order_id
-- customer_id
-- status
-- canceled_at
-
-order_cancellations
-- cancel_id
-- order_id
-- customer_id
-- reason
-- outcome
-- requested_at
-```
-
-## 4단계: Observability
-
-기존에도 `[Tool] getXxx(...)`와 최종 `LLM call completed` 로그는 보고 있었지만, Tool 왕복 구조를 보기에는 부족했어요.
-이번 단계에서는 Tool 없는 `/api/v1/chat`과 Tool 3개가 등록된 `/api/v1/assistant`를 분리하고, `PerformanceLoggingAdvisor`에서 요청 프롬프트와 Tool 정의를, `ObservedToolCallingManager`에서 Tool 실행 후 2차 프롬프트를 기록하도록 보강했어요.
-
-> 아래의 프롬프트 전문과 ToolResponseMessage 전문은 실험 당시 관찰을 위해 캡처한 로그예요.
-> 리뷰 반영 후 코드에서는 INFO 로그에 원문 프롬프트/ToolResponse를 남기지 않고, message count, tool name, message type 같은 요약만 남기도록 바꿨어요.
-> 상세 로그가 필요할 때도 DEBUG에서 전화번호/주소/계좌 패턴을 마스킹하고 길이를 제한해 출력합니다.
-
-운영 로그 정책:
-
-- 운영 프로파일에서는 프롬프트/ToolResponse 원문 로그를 기본 OFF로 둬요.
-- 장애 분석을 위해 필요한 경우에만 1% 이하 샘플링과 24시간 이하 보존 기간을 두고 단기간 활성화해요.
-- `orderId`, 주소, 전화번호, 계좌, 사용자 식별자는 마스킹 대상이에요.
-- 운영 배포 전에는 샘플 요청을 한 번 실행해 INFO 로그에 원문 프롬프트, ToolResponse, 자유 입력 취소 사유가 그대로 남지 않는지 확인해요.
-
-### 구현 메모
-
-- `/api/v1/chat`: `chatClient` 사용, Tool 미등록 기준선
-- `/api/v1/assistant`: `syncChatClient` 사용, `getOrderDetail`, `getDeliveryStatus`, `cancelOrder` 등록
-- `PerformanceLoggingAdvisor`: LLM 호출 전 `messages`와 `tools` 요약을 출력하고, 호출 후 elapsed/token 사용량 출력
-- `ObservedToolCallingManager`: Spring AI의 `ToolCallingManager`를 감싸서 Tool 정의 resolve와 ToolResponseMessage가 붙은 conversation history 요약 출력
-- `ToolCallingObservabilityConfig`: `ToolCallingManager` Bean을 `ChatClientConfig`와 분리해 순환 참조 없이 등록
-
-### Tool 왕복 로그 관찰
-
-요청:
+### 시나리오 1 - "그거"로 같은 주문 배송 재조회
 
 ```bash
-curl -s -X POST ${BASE_URL}/api/v1/assistant \
-  -H "Content-Type: application/json" \
-  -H "X-Customer-Id: ${CUSTOMER_ID}" \
-  -d '{"message":"주문번호 2024-1234 배달 어디쯤에 있어요?"}'
+curl -X POST http://localhost:18080/api/v1/assistant \
+  -H 'Content-Type: application/json' \
+  -H 'X-Customer-Id: customer-1' \
+  -H 'X-Session-Id: s1-cust-A' \
+  -d '{"message":"2024-1234 어디쯤 있어요?"}'
+
+curl -X POST http://localhost:18080/api/v1/assistant \
+  -H 'Content-Type: application/json' \
+  -H 'X-Customer-Id: customer-1' \
+  -H 'X-Session-Id: s1-cust-A' \
+  -d '{"message":"그거 언제 도착해요?"}'
 ```
 
 응답:
 
 ```text
-핵심 답변: 주문번호 2024-1234는 현재 배달 중입니다. 라이더는 역삼역 사거리에 있습니다. 추가 정보가 필요하지 않습니다.
-
-다음에 고객이 할 행동: 주문 상태를 다시 확인하거나 배달 예정 시간을 확인해 주세요.
+1턴: 주문번호 2024-1234는 현재 배달 중이에요. 라이더는 역삼역 사거리에 있어요.
+2턴: 주문번호 2024-1234는 현재 배달 중이에요. 라이더가 역삼역 사거리에 위치해 있어요.
 ```
 
-1차 LLM 호출 로그:
+주요 로그:
 
 ```text
-LLM request prompt. endpoint=assistant, messageCount=2, toolCount=3
-messages:
-1. type=SYSTEM, text="[역할]
-당신은 배달 플랫폼의 고객 상담 AI 에이전트입니다.
-주문, 배달 상태, 주문 취소, 환불, 결제, 기타 문의를 분류하고 고객이 다음에 무엇을 해야 하는지 안내합니다.
-
-[규칙]
-- 반드시 한국어로만 응답합니다.
-- 항상 존댓말을 사용합니다.
-- 고객 문의를 ORDER, DELIVERY, CANCEL, REFUND, PAYMENT, ETC 중 하나로 분류합니다.
-- 정보가 부족하면 추측하지 말고, neededInfo에 필요한 정보를 적습니다.
-- 실제 주문 상태, 환불 가능 여부, 결제 취소 가능 여부는 시스템 확인이 필요하다고 안내합니다.
-- 주문번호가 있고 주문 메뉴, 배달 상태, 주문 취소를 물으면 반드시 사용 가능한 Tool로 실제 Mock 주문을 조회합니다.
-- 고객이 "취소해주세요", "취소해줘"처럼 실제 취소 실행을 요청하면 취소 사유가 없어도 reason을 "고객 요청"으로 하여 cancelOrder Tool을 호출합니다.
-- 고객이 "한 번 더 취소해주세요", "다시 취소해주세요"처럼 재취소 실행을 요청하면 이미 취소 여부를 먼저 조회하지 말고 cancelOrder Tool을 호출합니다.
-- 취소 실행 요청은 주문 상태를 먼저 조회하지 말고 cancelOrder Tool의 outcome으로 취소 성공, 이미 취소, 취소 불가, 주문 없음 여부를 판단합니다.
-- 고객이 취소 가능 여부만 물으면 실제 취소를 실행하지 말고 조회 Tool 결과를 바탕으로 안내합니다.
-- 취소 또는 환불 완료 주문을 되돌리거나 음식 제공을 확정하지 않습니다. 이런 요청은 새 주문 진행 또는 고객센터/상담원 확인으로 안내합니다.
-- 취소 또는 환불 완료 주문에 대해 가게나 라이더에게 직접 연락하라고 안내하지 않습니다.
-- Tool 조회 결과가 없으면 주문을 찾을 수 없다고 안내하고 추측하지 않습니다.
-- Tool 결과의 outcome, status, riderLocation, items 값을 우선해서 답변합니다.
-- 상담원이 확인해야 하는 사안이면 handoffRequired를 true로 설정하고 handoffReason에 사유를 적습니다.
-- urgency는 고객 피해 가능성, 결제/환불 영향, 배달 지연 정도를 기준으로 판단합니다.
-
-[금지]
-- 고객, 사장님, 라이더의 전화번호, 주소, 계좌 등 개인정보를 노출하지 않습니다.
-- 환불, 보상, 쿠폰 지급을 확정적으로 약속하지 않습니다.
-- 타 배달 플랫폼을 추천하거나 비교하지 않습니다.
-
-[응답 포맷]
-1) 핵심 답변은 3문장 이내로 요약합니다.
-2) 필요한 추가 정보를 질문합니다.
-3) 고객이 다음에 취할 액션을 제안합니다.
-"
-2. type=USER, text="주문번호 2024-1234 배달 어디쯤에 있어요?"
-tools:
-- name=getOrderDetail
-  description="주문번호로 주문 메뉴, 수량, 금액, 주문 상태를 조회합니다."
-  inputSchema={
-  "$schema" : "https://json-schema.org/draft/2020-12/schema",
-  "type" : "object",
-  "properties" : {
-    "orderId" : {
-      "type" : "string",
-      "description" : "조회할 주문번호"
-    }
-  },
-  "required" : [ "orderId" ],
-  "additionalProperties" : false
-}
-- name=getDeliveryStatus
-  description="주문번호로 배달 상태와 라이더 위치를 조회합니다."
-  inputSchema={
-  "$schema" : "https://json-schema.org/draft/2020-12/schema",
-  "type" : "object",
-  "properties" : {
-    "orderId" : {
-      "type" : "string",
-      "description" : "조회할 주문번호"
-    }
-  },
-  "required" : [ "orderId" ],
-  "additionalProperties" : false
-}
-- name=cancelOrder
-  description="고객이 주문 취소 실행을 요청하면 주문번호와 취소 사유를 받아 주문을 취소하고 결과를 반환합니다.
-"취소해주세요", "취소해줘", "방금 시킨 건 취소"처럼 실행 의도가 명확하면 사유가 없어도 reason을 "고객 요청"으로 넣어 호출합니다.
-"한 번 더 취소해주세요", "다시 취소해주세요"처럼 재취소 요청이 포함되어도 이 Tool을 호출하여 ALREADY_CANCELED outcome을 확인합니다.
-배달 완료, 이미 취소, 존재하지 않는 주문을 포함한 모든 취소 실행 요청은 이 Tool을 호출하고 outcome으로 결과를 판단합니다.
-단순히 취소 가능 여부만 묻는 경우에는 이 Tool을 호출하지 않습니다.
-"
-  inputSchema={
-  "$schema" : "https://json-schema.org/draft/2020-12/schema",
-  "type" : "object",
-  "properties" : {
-    "orderId" : {
-      "type" : "string",
-      "description" : "취소할 주문번호"
-    },
-    "reason" : {
-      "type" : "string",
-      "description" : "고객이 말한 취소 사유"
-    }
-  },
-  "required" : [ "orderId", "reason" ],
-  "additionalProperties" : false
-}
-```
-
-Tool 정의 resolve 로그:
-
-```text
-LLM tool definitions resolved. toolCount=3
-- name=getOrderDetail
-- name=getDeliveryStatus
-- name=cancelOrder
-```
-
-Tool 실행 시점 로그:
-
-```text
-Executing tool call: getDeliveryStatus
+1턴: messageCount=2, messages=SYSTEM(chars=1297), USER(chars=18)
 [Tool] getDeliveryStatus(orderId=2024-1234)
+LLM call completed. elapsedMs=37357, promptTokens=2355
+
+2턴: messageCount=4, messages=USER(chars=18), ASSISTANT(chars=65), SYSTEM(chars=1297), USER(chars=11)
+[Tool] getDeliveryStatus(orderId=2024-1234)
+LLM call completed. elapsedMs=34551, promptTokens=2471
 ```
 
-2차 LLM 호출에 들어가는 ToolResponseMessage 로그:
+Memory 상태:
 
-```text
-LLM tool response prompt prepared. messageCount=4
-1. type=SYSTEM, text="[1차 LLM 호출과 동일한 System Prompt 전문]"
-2. type=USER, text="주문번호 2024-1234 배달 어디쯤에 있어요?"
-3. type=ASSISTANT, text="", toolCalls=[ToolCall[id=, type=function, name=getDeliveryStatus, arguments={"orderId":"2024-1234"}]]
-4. type=TOOL, responses=[ToolResponse[id=, name=getDeliveryStatus, responseData={"orderId":"2024-1234","status":"DELIVERING","riderLocation":"역삼역 사거리","message":"배달 중입니다."}]]
+```json
+[
+  {"type":"USER","content":"2024-1234 어디쯤 있어요?"},
+  {"type":"ASSISTANT","content":"주문번호 2024-1234는 현재 배달 중이에요. 라이더는 역삼역 사거리에 있어요. 추가 정보가 필요하지 않습니다."},
+  {"type":"USER","content":"그거 언제 도착해요?"},
+  {"type":"ASSISTANT","content":"주문번호 2024-1234는 현재 배달 중이에요. 라이더가 역삼역 사거리에 위치해 있어요. 정확한 도착 시간은 라이더의 배달 진행 상황에 따라 변할 수 있으니, 주문 상태를 다시 확인해 주세요."}
+]
 ```
 
-최종 LLM 호출 완료 로그:
-
-```text
-LLM call completed. endpoint=assistant, elapsedMs=24504, promptTokens=2369, completionTokens=1550, totalTokens=3919
-```
-
-### 입력 토큰 비교
-
-같은 `"안녕하세요"` 요청을 Tool 없는 endpoint와 Tool 등록 endpoint에 각각 보냈어요.
-
-| 엔드포인트 | 같은 질문 | 입력 토큰 | 출력 토큰 | 응답 시간 |
-| --- | --- | ---: | ---: | ---: |
-| `/api/v1/chat` (Tool 없음) | `"안녕하세요"` | 691 | 1528 | 26505ms |
-| `/api/v1/assistant` (Tool 3개 등록) | `"안녕하세요"` | 1128 | 1301 | 20992ms |
-
-응답 본문:
-
-```text
-[/api/v1/chat]
-핵심 답변: 안녕하세요! 배달 플랫폼 관련 문의가 있으신가요? 구체적인 내용을 알려주시면 도와드리겠습니다.
-
-필요한 추가 정보: 주문번호, 주문 메뉴, 배달 상태, 취소 여부 등 구체적인 정보를 알려주시면 더 정확한 도움을 드릴 수 있습니다.
-
-다음 액션: 주문 상태나 문제를 설명해 주시면 즉시 도와드리겠습니다.
-```
-
-```text
-[/api/v1/assistant]
-안녕하세요! 고객님, 어떤 도움이 필요하신가요?
-주문 상태, 배달 정보, 취소, 환불, 결제 관련 문의가 있으신가요?
-다음에 해야 할 행동은 주문 번호를 알려주시거나 구체적인 문제를 설명해 주세요.
-```
-
-입력 토큰 차이는 `1128 - 691 = 437`토큰이에요.
-사용자 질문은 같고 System Prompt도 같기 때문에 차이는 `/api/v1/assistant`에 붙은 Tool 3개의 `name`, `description`, `inputSchema` JSON 스키마에서 발생한 것으로 봤어요.
-인사처럼 Tool을 호출하지 않는 질문이어도, Tool 후보를 모델에게 보여줘야 하므로 입력 토큰은 먼저 증가해요.
-
-Tool이 실제로 호출되는 질문도 비교했어요.
-
-| 엔드포인트 | 질문 | 입력 토큰 | 출력 토큰 | 응답 시간 |
-| --- | --- | ---: | ---: | ---: |
-| `/api/v1/chat` (Tool 없음 기준선) | `"안녕하세요"` | 691 | 1528 | 26505ms |
-| `/api/v1/assistant` (Tool 호출) | `"주문번호 2024-1234 배달 어디쯤에 있어요?"` | 2369 | 1550 | 24504ms |
-
-Tool 호출 시나리오는 Tool 없는 기준선 대비 입력 토큰이 `2369 / 691 = 3.43배`였어요.
-단순히 Tool schema 3개가 추가되는 것에서 끝나지 않고, 1차 LLM이 Tool call을 선택한 뒤 `ToolResponseMessage`가 conversation history에 붙어서 2차 LLM 호출이 다시 일어나기 때문이에요.
-그래서 Tool Calling은 정확한 외부 상태를 가져오는 장점이 있지만, 호출이 필요한 질문에서는 프롬프트 왕복과 토큰 비용이 함께 늘어납니다.
-
-### AI 코드 리뷰
-
-다음 프롬프트로 AI에게 먼저 코드를 요청했다고 가정하고, 그 결과를 프로덕션 관점에서 리뷰했어요.
-
-```text
-"Spring AI 1.0으로 배달 주문 취소 Tool을 만들어줘. @Tool 어노테이션을 써야 해."
-```
-
-#### AI 생성 원본 코드
-
-```java
-@Component
-@RequiredArgsConstructor
-public class OrderCancelTool {
-
-    private final OrderRepository orderRepository;
-
-    @Tool(description = "Cancel delivery order")
-    public Order cancelOrder(@ToolParam(description = "order id") String orderId) {
-        Order order = orderRepository.findById(orderId)
-                .orElseThrow(() -> new IllegalArgumentException("Order not found"));
-
-        order.setStatus(OrderStatus.CANCELED);
-        order.setCanceledAt(LocalDateTime.now());
-
-        return orderRepository.save(order);
-    }
-}
-```
-
-이 코드는 데모 수준으로는 짧아 보이지만, 실제 배달 주문 취소 Tool로는 그대로 올리면 안 된다고 봤어요.
-
-#### 프로덕션 결함과 개선 방안
-
-| 결함 | 왜 위험한가 | 이번 수업 방식의 개선 |
-| --- | --- | --- |
-| 멱등성 없음 | 같은 주문을 두 번 취소하면 두 번째 요청도 다시 취소 성공처럼 처리될 수 있어요. 환불, 포인트, 알림이 연결되면 중복 처리 사고가 납니다. | `CANCELED / ALREADY_CANCELED / NOT_CANCELABLE / NOT_FOUND` Outcome을 나누고, 이미 취소된 주문은 첫 `cancelId`, `canceledReason`, `canceledAt`을 재전달해요. |
-| 예외를 그대로 throw | 주문이 없을 때 예외가 터지면 LLM은 정상적인 Tool 결과를 받지 못하고 fallback 안내도 어려워져요. | 없는 주문은 예외가 아니라 `CancelOrderResult.notFound(orderId)`를 반환해 LLM이 "주문을 찾을 수 없음"으로 답하게 해요. |
-| 내부 엔티티 그대로 반환 | `Order` 엔티티에는 주소, 고객 ID, 취소 사유, 내부 상태처럼 LLM에게 줄 필요 없는 정보가 섞일 수 있어요. 토큰도 낭비돼요. | Tool 응답은 `CancelOrderResult` 같은 전용 DTO로 제한하고, 메뉴 조회도 `OrderDetailView`처럼 필요한 필드만 노출해요. |
-| 권한 검증 없음 | 주문번호만 아는 사람이 다른 고객 주문을 취소할 수 있어요. | `CurrentCustomerProvider`에서 현재 고객 ID를 얻고 `findByIdForCustomer(orderId, customerId)`로 소유자 주문만 조회해요. |
-| description 부실 | "Cancel delivery order"만으로는 언제 호출해야 하는지, 재취소 요청은 어떻게 처리해야 하는지 모델이 알기 어려워요. | 한국어 description에 실행 의도, 기본 사유, 재취소 요청, 취소 가능 여부 질문과 실행 요청의 차이를 명시해요. |
-| 로깅 없음 | 누가 어떤 주문을 언제 취소 요청했는지 감사 추적이 어려워요. | `ToolLoggingAspect`에서 `[Tool] cancelOrder(orderId=..., reason=...)`와 outcome/result 로그를 공통 기록해요. |
-| Outcome 구분 없음 | 단순히 엔티티나 boolean만 반환하면 LLM이 취소 성공, 이미 취소, 취소 불가, 주문 없음의 차이를 안정적으로 설명하기 어려워요. | `CancelOrderOutcome` enum을 응답에 포함해 후속 자연어 응답과 운영 로그가 같은 기준을 보게 해요. |
-
-#### 본인 개선 코드
-
-```java
-@Component
-@RequiredArgsConstructor
-public class OrderTools {
-
-    private final OrderCancelService orderCancelService;
-    private final CurrentCustomerProvider currentCustomerProvider;
-
-    @Tool(
-            name = "cancelOrder",
-            description = """
-                    고객이 주문 취소 실행을 요청하면 주문번호와 취소 사유를 받아 주문을 취소하고 결과를 반환합니다.
-                    "취소해주세요", "취소해줘", "방금 시킨 건 취소"처럼 실행 의도가 명확하면 사유가 없어도 reason을 "고객 요청"으로 넣어 호출합니다.
-                    "한 번 더 취소해주세요", "다시 취소해주세요"처럼 재취소 요청이 포함되어도 이 Tool을 호출하여 ALREADY_CANCELED outcome을 확인합니다.
-                    배달 완료, 이미 취소, 존재하지 않는 주문을 포함한 모든 취소 실행 요청은 이 Tool을 호출하고 outcome으로 결과를 판단합니다.
-                    단순히 취소 가능 여부만 묻는 경우에는 이 Tool을 호출하지 않습니다.
-                    """
-    )
-    public CancelOrderResult cancelOrder(
-            @ToolParam(description = "취소할 주문번호") String orderId,
-            @ToolParam(description = "고객이 말한 취소 사유") String reason
-    ) {
-        return orderCancelService.cancel(orderId, currentCustomerProvider.currentCustomerId(), reason);
-    }
-}
-```
-
-```java
-@Service
-@RequiredArgsConstructor
-public class OrderCancelService {
-
-    private final OrderMockService orderMockService;
-    private final CancelHistoryService cancelHistoryService;
-
-    public CancelOrderResult cancel(String orderId, String customerId, String reason) {
-        return orderMockService.findByIdForCustomer(orderId, customerId)
-                .map(order -> cancelExistingOrder(order, reason))
-                .orElseGet(() -> CancelOrderResult.notFound(orderId));
-    }
-
-    private CancelOrderResult cancelExistingOrder(Order order, String reason) {
-        OffsetDateTime requestedAt = OffsetDateTime.now();
-        CancelOrderOutcome outcome = order.cancelIfPossible(reason, requestedAt);
-
-        CancelHistory history = switch (outcome) {
-            case CANCELED -> cancelHistoryService.record(order, reason, outcome, requestedAt);
-            case ALREADY_CANCELED -> cancelHistoryService.findLatestCanceled(order.getOrderId(), order.getCustomerId())
-                    .orElse(null);
-            case NOT_CANCELABLE, NOT_FOUND -> null;
-        };
-
-        return CancelOrderResult.from(order, outcome, history);
-    }
-}
-```
-
-```java
-public record CancelOrderResult(
-        String orderId,
-        String cancelId,
-        CancelOrderOutcome outcome,
-        OrderStatus status,
-        String message,
-        String canceledReason,
-        OffsetDateTime canceledAt
-) {
-
-    public static CancelOrderResult notFound(String orderId) {
-        return new CancelOrderResult(
-                orderId,
-                null,
-                CancelOrderOutcome.NOT_FOUND,
-                null,
-                "주문을 찾을 수 없습니다.",
-                null,
-                null
-        );
-    }
-}
-```
-
-로깅은 Tool 메서드 안에 직접 넣지 않고 AOP로 분리했어요.
-
-```java
-@Around("@annotation(org.springframework.ai.tool.annotation.Tool)")
-public Object logToolCall(ProceedingJoinPoint joinPoint) throws Throwable {
-    Method method = ((MethodSignature) joinPoint.getSignature()).getMethod();
-    String methodName = method.getName();
-
-    log.info("[Tool] {}({})", methodName, formatArguments(methodName, joinPoint.getArgs()));
-
-    Object result = joinPoint.proceed();
-    logResult(methodName, result);
-    return result;
-}
-```
-
-개선 결과, LLM은 예외나 내부 엔티티가 아니라 `outcome`, `status`, `message`, `cancelId`가 들어 있는 안정적인 Tool 결과를 받게 됐어요.
-그리고 중복 취소 요청도 새 취소 이벤트를 만들지 않고 `ALREADY_CANCELED`로 분기해 첫 취소 이력을 재전달할 수 있었어요.
-
-## 테스트 코드
-
-기본 검증은 실제 Ollama를 호출하지 않는 단위/웹 계층 테스트로 작성했어요.
-로컬 LLM 응답은 느리고 비결정적이므로, 자동 테스트에서는 `ChatClient` 응답을 mock으로 고정하고 서버가 Structured Output을 그대로 반환하는지 확인했어요.
-
-- `OrderToolsTest`: 주문 소유자 검증, 이미 취소된 주문, 첫 취소 시 `cancelId` 생성, 재취소 시 첫 `cancelId`/취소 사유/취소 시각 재사용 검증
-- `BaedalPromptTest`: System Prompt의 핵심 금지 규칙 검증
-- `SupportControllerTest`: 요청 검증과 fallback 응답 검증
-- `PolicyValidationAdvisorTest`: 정책 위반 응답 fallback 검증
-
-검증 명령:
+### 시나리오 2 - 취소 대상 전환
 
 ```bash
-./gradlew test
+curl -X POST http://localhost:18080/api/v1/assistant \
+  -H 'Content-Type: application/json' \
+  -H 'X-Customer-Id: customer-1' \
+  -H 'X-Session-Id: s2-cust-A' \
+  -d '{"message":"2024-1234 취소해주세요"}'
+
+curl -X POST http://localhost:18080/api/v1/assistant \
+  -H 'Content-Type: application/json' \
+  -H 'X-Customer-Id: customer-1' \
+  -H 'X-Session-Id: s2-cust-A' \
+  -d '{"message":"아, 그거 말고 2024-1235 취소해주세요"}'
 ```
 
-실행 결과:
+응답:
 
 ```text
-BUILD SUCCESSFUL
+1턴: 주문 번호 2024-1234는 현재 배달 중이므로 취소할 수 없어요.
+2턴: 주문 번호 2024-1235가 성공적으로 취소되었습니다.
 ```
 
-## 자가 점검
+주요 로그:
 
-### Tool Calling
+```text
+1턴: [Tool] cancelOrder(orderId=2024-1234, reason=고객 요청)
+1턴: [Tool] cancelOrder result(orderId=2024-1234, cancelId=null, outcome=NOT_CANCELABLE, status=DELIVERING, ...)
 
-- [x] `./gradlew bootRun`으로 프로젝트가 정상 실행되는가?
-- [x] 시나리오 5종의 응답 본문이 모두 README에 있는가?
-- [x] 콘솔 로그의 `[Tool] getXxx(orderId=...)` 라인을 각 시나리오마다 캡처했는가?
-- [x] Mock 주문 4건이 실제로 `seed()`에 추가되었는가? (`OrderMockService seeded — 6건` 로그로 확인)
-- [x] `2024-1238` 주문에 `order.cancel("고객 요청", ...)` 호출이 포함되어 `canceledReason`이 채워져 있는가?
-- [x] 설계 결정 3개 질문에 대한 "왜?" 답이 README에 있는가?
-- [x] 주문 조회/취소 Tool이 현재 고객 소유 주문만 반환하도록 검증하는가?
+2턴: messageCount=4, messages=USER(chars=16), ASSISTANT(chars=93), SYSTEM(chars=1297), USER(chars=25)
+2턴: [Tool] cancelOrder(orderId=2024-1235, reason=고객 요청)
+2턴: [Tool] cancelOrder result(orderId=2024-1235, cancelId=a9a2c7b9-590d-42a7-b18f-6f4e35bfd0f8, outcome=CANCELED, status=CANCELED, ...)
+```
 
-### 멱등성
+Memory 상태:
 
-- [x] Outcome 4가지를 모두 실행하고 LLM 응답을 기록했는가?
-- [x] 멱등성 분기 제거 후 코드 동작, LLM 응답, `canceledReason`/`canceledAt` 덮어씌움을 README에 기록했는가?
-- [x] 첫 취소 `cancelId`를 재취소 응답에서 재사용하고, 분기 제거 시 새 `cancelId`가 생기는 문제를 관찰했는가?
-- [x] 고객 오해 3가지 이상과 프로덕션 장애 3가지 이상을 작성했는가?
-- [x] Outcome enum 설계 근거와 신규 Outcome 2개 이상 아이디어를 작성했는가?
+```json
+[
+  {"type":"USER","content":"2024-1234 취소해주세요"},
+  {"type":"ASSISTANT","content":"핵심 답변: 주문 번호 2024-1234는 현재 배달 중이므로 취소할 수 없어요. 주문이 이미 라이더에게 전달되었습니다. 주문을 기다리거나 고객센터에 문의해 주세요."},
+  {"type":"USER","content":"아, 그거 말고 2024-1235 취소해주세요"},
+  {"type":"ASSISTANT","content":"핵심 답변: 주문 번호 2024-1235가 성공적으로 취소되었습니다. 라이더가 주문을 받지 못했으므로 추가 조치가 필요하지 않습니다. 다른 주문 취소나 도움이 필요하면 알려주세요."}
+]
+```
 
-### Tool description
+### 시나리오 3 - "아까 물어본 그 주문"
 
-- [x] 세 버전의 description 전문이 README에 있는가?
-- [x] 각 버전별 Tool 호출 횟수와 응답의 "역삼역 사거리" 포함 횟수가 수치 표로 기록되어 있는가?
-- [x] 버전 C에서 잘못된 Tool 호출과 추측성 답변이 구체적으로 기록되어 있는가?
-- [x] description 필수 항목 4가지와 오래된 description 방지 대책이 작성되어 있는가?
+```bash
+curl -X POST http://localhost:18080/api/v1/assistant \
+  -H 'Content-Type: application/json' \
+  -H 'X-Customer-Id: customer-1' \
+  -H 'X-Session-Id: s3-cust-A' \
+  -d '{"message":"2024-1234 배달 상황 알려주세요"}'
 
-### Observability
+curl -X POST http://localhost:18080/api/v1/assistant \
+  -H 'Content-Type: application/json' \
+  -H 'X-Customer-Id: customer-1' \
+  -H 'X-Session-Id: s3-cust-A' \
+  -d '{"message":"아까 물어본 그 주문 언제 도착해요?"}'
+```
 
-- [x] `/api/v1/assistant`에서 1차 LLM 호출 프롬프트와 Tool JSON 스키마를 README에 기록했는가?
-- [x] `[Tool] getDeliveryStatus(orderId=2024-1234)` 로그를 기록했는가?
-- [x] ToolResponseMessage가 포함된 2차 LLM 호출 conversation history를 기록했는가?
-- [x] 최종 `LLM call completed`의 응답 시간과 입출력 토큰을 기록했는가?
-- [x] `/api/v1/chat`과 `/api/v1/assistant`의 같은 질문 입력 토큰 차이를 수치로 비교했는가?
-- [x] Tool 호출 시나리오가 Tool 없는 기준선 대비 몇 배의 입력 토큰을 쓰는지 기록했는가?
+응답:
+
+```text
+1턴: 주문 번호 2024-1234는 현재 배달 중이에요. 라이더가 역삼역 사거리에 위치해 있어요.
+2턴: 주문 2024-1234는 현재 배달 중이에요. 라이더가 역삼역 사거리에 위치해 있어요.
+```
+
+주요 로그:
+
+```text
+2턴: messageCount=4, messages=USER(chars=21), ASSISTANT(chars=73), SYSTEM(chars=1297), USER(chars=20)
+2턴: [Tool] getDeliveryStatus(orderId=2024-1234)
+2턴: LLM call completed. elapsedMs=58291, promptTokens=2499, completionTokens=3471
+```
+
+Memory 상태:
+
+```json
+[
+  {"type":"USER","content":"2024-1234 배달 상황 알려주세요"},
+  {"type":"ASSISTANT","content":"주문 번호 2024-1234는 현재 배달 중이에요. 라이더가 역삼역 사거리에 위치해 있어요. 추가로 도움이 필요하시면 알려주세요."},
+  {"type":"USER","content":"아까 물어본 그 주문 언제 도착해요?"},
+  {"type":"ASSISTANT","content":"주문 2024-1234는 현재 배달 중이에요. 라이더가 역삼역 사거리에 위치해 있어요. 도착 예정 시간은 아직 확인할 수 없어요. 추가로 도움이 필요하시면 알려주세요."}
+]
+```
+
+### 시나리오 4 - 세션 오염 방지
+
+```bash
+curl -X POST http://localhost:18080/api/v1/assistant \
+  -H 'Content-Type: application/json' \
+  -H 'X-Customer-Id: customer-1' \
+  -H 'X-Session-Id: s4-A' \
+  -d '{"message":"2024-1234 지금 어디쯤이에요?"}'
+
+curl -X POST http://localhost:18080/api/v1/assistant \
+  -H 'Content-Type: application/json' \
+  -H 'X-Customer-Id: customer-1' \
+  -H 'X-Session-Id: s4-B' \
+  -d '{"message":"그 주문 어디쯤이에요?"}'
+```
+
+응답:
+
+```text
+s4-A: 주문번호 2024-1234는 현재 배달 중이에요. 라이더는 역삼역 사거리에 위치해 있어요.
+s4-B: 주문 상태를 확인하려면 주문번호를 알려주세요.
+```
+
+주요 로그:
+
+```text
+s4-A: conversationId=customer-1:s4-A, messageCount=2
+s4-A: [Tool] getDeliveryStatus(orderId=2024-1234)
+
+s4-B: conversationId=customer-1:s4-B, messageCount=2
+s4-B: LLM call completed. promptTokens=1134
+```
+
+`s4-B`에서는 `getDeliveryStatus` Tool이 호출되지 않았어요.
+`s4-A`와 `s4-B`의 Memory도 서로 분리되어 있어요.
+
+```json
+// s4-A
+[
+  {"type":"USER","content":"2024-1234 지금 어디쯤이에요?"},
+  {"type":"ASSISTANT","content":"주문번호 2024-1234는 현재 배달 중이에요. 라이더는 역삼역 사거리에 위치해 있어요. 추가로 궁금한 사항이 있으면 알려주세요."}
+]
+
+// s4-B
+[
+  {"type":"USER","content":"그 주문 어디쯤이에요?"},
+  {"type":"ASSISTANT","content":"주문 상태를 확인하려면 주문번호를 알려주세요. 주문번호가 없으면 배달 상태를 확인할 수 없어요. 다음 단계는 주문번호를 입력해 주세요."}
+]
+```
+
+세션 목록도 현재 고객 기준으로만 조회돼요.
+
+```json
+["s1-cust-A","s2-cust-A","s3-cust-A","s4-B","s4-A"]
+```
+
+### 시나리오 5 - Memory 삭제 후 맥락 소실
+
+```bash
+curl -X POST http://localhost:18080/api/v1/assistant \
+  -H 'Content-Type: application/json' \
+  -H 'X-Customer-Id: customer-1' \
+  -H 'X-Session-Id: s5-A' \
+  -d '{"message":"2024-1234 배달 어디쯤이에요?"}'
+
+curl http://localhost:18080/api/v1/session/s5-A/messages \
+  -H 'X-Customer-Id: customer-1'
+
+curl -X DELETE http://localhost:18080/api/v1/session/s5-A \
+  -H 'X-Customer-Id: customer-1'
+
+curl http://localhost:18080/api/v1/session/s5-A/messages \
+  -H 'X-Customer-Id: customer-1'
+
+curl -X POST http://localhost:18080/api/v1/assistant \
+  -H 'Content-Type: application/json' \
+  -H 'X-Customer-Id: customer-1' \
+  -H 'X-Session-Id: s5-A' \
+  -d '{"message":"그거 언제 도착해요?"}'
+```
+
+삭제 전 Memory:
+
+```json
+[
+  {"type":"USER","content":"2024-1234 배달 어디쯤이에요?"},
+  {"type":"ASSISTANT","content":"핵심 답변: 주문번호 2024-1234의 배달 상태는 배달 중이에요. 라이더는 현재 역삼역 사거리에 위치해 있어요. 주문이 정확히 배달 중이니 추가 확인이 필요하시면 다시 문의해 주세요."}
+]
+```
+
+삭제 직후 Memory:
+
+```json
+[]
+```
+
+삭제 후 "그거" 응답:
+
+```text
+핵심 답변: 주문 번호가 필요해요. 배달 상태를 확인하기 위해 주문 번호를 알려주세요.
+```
+
+주요 로그:
+
+```text
+[Session] clear sessionId=s5-A
+삭제 후 요청: messageCount=2, messages=SYSTEM(chars=1297), USER(chars=11)
+삭제 후 요청: LLM call completed. promptTokens=1133
+```
+
+삭제 이후에는 이전 `2024-1234`가 프롬프트에 포함되지 않았고, Tool도 호출되지 않았어요.
+
+### 추가 실험 - 여러 seed 주문을 섞었을 때 대명사 해석
+
+1단계 기본 시나리오는 한 번에 한 주문만 강하게 다루는 편이라, 여러 주문이 같은 Memory 안에 있을 때 대명사가 어느 주문으로 붙는지도 따로 확인했어요.
+사용한 seed는 `2024-1234`와 `2024-1237`이에요.
+
+```text
+2024-1234 = DELIVERING, 허니콤보/콜라, riderLocation=역삼역 사거리
+2024-1237 = COOKING, 불고기버거/감자튀김, riderLocation=null
+```
+
+실행 흐름:
+
+```bash
+curl -X POST http://localhost:18080/api/v1/assistant \
+  -H 'Content-Type: application/json' \
+  -H 'X-Customer-Id: customer-1' \
+  -H 'X-Session-Id: multi-seed-pronoun' \
+  -d '{"message":"2024-1234 배달 상황 알려주세요"}'
+
+curl -X POST http://localhost:18080/api/v1/assistant \
+  -H 'Content-Type: application/json' \
+  -H 'X-Customer-Id: customer-1' \
+  -H 'X-Session-Id: multi-seed-pronoun' \
+  -d '{"message":"2024-1237 주문 메뉴 뭐였죠?"}'
+
+curl -X POST http://localhost:18080/api/v1/assistant \
+  -H 'Content-Type: application/json' \
+  -H 'X-Customer-Id: customer-1' \
+  -H 'X-Session-Id: multi-seed-pronoun' \
+  -d '{"message":"그 버거 세트 지금 어디쯤이에요?"}'
+
+curl -X POST http://localhost:18080/api/v1/assistant \
+  -H 'Content-Type: application/json' \
+  -H 'X-Customer-Id: customer-1' \
+  -H 'X-Session-Id: multi-seed-pronoun' \
+  -d '{"message":"아까 배달 중이던 그 주문 라이더 위치 다시 확인해줘"}'
+
+curl -X POST http://localhost:18080/api/v1/assistant \
+  -H 'Content-Type: application/json' \
+  -H 'X-Customer-Id: customer-1' \
+  -H 'X-Session-Id: multi-seed-pronoun' \
+  -d '{"message":"처음에 물어본 그 주문 라이더 위치 다시 확인해줘"}'
+```
+
+관찰 결과:
+
+| 턴 | 사용자 표현 | 기대 orderId | 실제 Tool 호출 | 결과 |
+| --- | --- | --- | --- | --- |
+| 1 | `2024-1234 배달 상황` | `2024-1234` | `getDeliveryStatus(2024-1234)` | 성공 |
+| 2 | `2024-1237 주문 메뉴` | `2024-1237` | `getOrderDetail(2024-1237)` | 성공 |
+| 3 | `그 버거 세트` | `2024-1237` | `getDeliveryStatus(2024-1237)` | 성공 |
+| 4 | `아까 배달 중이던 그 주문` | `2024-1234` | `getDeliveryStatus(2024-1237)` | 실패 |
+| 5 | `처음에 물어본 그 주문` | `2024-1234` | `getDeliveryStatus(2024-1237)` | 실패 |
+
+실패 로그:
+
+```text
+[Assistant] sessionId=multi-seed-pronoun, conversationId=customer-1:multi-seed-pronoun, message=아까 배달 중이던 그 주문 라이더 위치 다시 확인해줘
+LLM request prompt. endpoint=assistant, messageCount=8, ...
+[Tool] getDeliveryStatus(orderId=2024-1237)
+[Tool] getDeliveryStatus result(... status=COOKING, riderLocation=null, message=매장에서 조리 중이에요.)
+```
+
+```text
+[Assistant] sessionId=multi-seed-pronoun, conversationId=customer-1:multi-seed-pronoun, message=처음에 물어본 그 주문 라이더 위치 다시 확인해줘
+LLM request prompt. endpoint=assistant, messageCount=10, ...
+[Tool] getDeliveryStatus(orderId=2024-1237)
+[Tool] getDeliveryStatus result(... status=COOKING, riderLocation=null, message=매장에서 조리 중이에요.)
+```
+
+Memory에는 `2024-1234`와 `2024-1237`이 모두 남아 있었지만, 모델은 "배달 중이던", "처음에 물어본" 같은 단서보다 최근의 `2024-1237` 문맥을 더 강하게 사용했어요.
+즉 Chat Memory가 있다고 해서 다중 주문 참조가 항상 정확해지는 것은 아니에요.
+주문이 여러 개 등장하는 상담에서는 "마지막 주문번호" 규칙만으로 부족하고, 모델이 헷갈릴 수 있는 표현이면 주문번호를 다시 확인하거나, 서버 쪽에서 "현재 활성 주문 후보"를 구조화해서 관리하는 정책이 필요해요.
+
+추가로 음식명처럼 Assistant 응답 본문에 명확히 남은 단서도 따로 확인했어요.
+처음에는 `2024-1237 주문 메뉴 뭐였죠?` 바로 다음에 `아까 감자튀김 들어있던 주문 배달 어디쯤이에요?`를 물었고, 이 케이스도 의미 있는 검증이라고 생각했어요.
+하지만 바로 직전 응답에 "감자튀김"이 있었기 때문에, 나중에 다시 보니 검증으로 약했어요.
+게다가 모델이 `2024-1237`은 맞췄지만 실제 Tool call이 아니라 아래 JSON을 응답 본문으로 출력했어요.
+
+```json
+{
+  "tool": "getDeliveryStatus",
+  "arguments": {
+    "orderId": "2024-1237"
+  }
+}
+```
+
+그래서 `food-reference-gap` 세션에서 중간에 다른 주문들을 끼워 다시 실험했어요.
+
+```text
+1) 2024-1237 주문 메뉴 뭐였죠?              -> 감자튀김 포함
+2) 2024-1234 배달 상황도 알려주세요         -> 배달 중 / 역삼역 사거리
+3) 2024-1239 주문 메뉴도 알려주세요         -> 초밥 세트 / 미소장국
+4) 아까 감자튀김 들어있던 주문 배달 어디쯤이에요?
+```
+
+이번에는 마지막 질문에서 실제 Tool call이 실행됐고, `2024-1237`을 정확히 선택했어요.
+
+```text
+[Assistant] sessionId=food-reference-gap, conversationId=customer-1:food-reference-gap, message=아까 감자튀김 들어있던 주문 배달 어디쯤이에요?
+LLM request prompt. endpoint=assistant, messageCount=8, ...
+[Tool] getDeliveryStatus(orderId=2024-1237)
+[Tool] getDeliveryStatus result(... status=COOKING, riderLocation=null, message=매장에서 조리 중입니다.)
+```
+
+Memory 상태도 네 번째 질문 직전에 `감자튀김`, `2024-1234`, `초밥 세트`가 모두 들어 있는 상태였어요.
+
+```json
+[
+  {
+    "type": "USER",
+    "content": "2024-1237 주문 메뉴 뭐였죠?"
+  },
+  {
+    "type": "ASSISTANT",
+    "content": "핵심 답변: 주문하신 메뉴는 2개의 불고기버거와 1개의 감자튀김입니다. 현재 주문 상태는 요리 중입니다."
+  },
+  {
+    "type": "USER",
+    "content": "2024-1234 배달 상황도 알려주세요"
+  },
+  {
+    "type": "ASSISTANT",
+    "content": "핵심 답변: 주문 2024-1234는 현재 배달 중입니다. 라이더가 역삼역 사거리에 위치해 있습니다."
+  },
+  {
+    "type": "USER",
+    "content": "2024-1239 주문 메뉴도 알려주세요"
+  },
+  {
+    "type": "ASSISTANT",
+    "content": "핵심 답변: 주문하신 메뉴는 1개의 초밥 세트와 1개의 미소장국입니다."
+  },
+  {
+    "type": "USER",
+    "content": "아까 감자튀김 들어있던 주문 배달 어디쯤이에요?"
+  },
+  {
+    "type": "ASSISTANT",
+    "content": "핵심 답변: 주문 2024-1237은 현재 매장에서 조리 중입니다. 라이더가 아직 배달을 시작하지 않은 상태입니다."
+  }
+]
+```
+
+이 관찰을 보면 모델은 "배달 중이던" 같은 상태 조건보다 "감자튀김" 같은 고유 메뉴명을 더 잘 따라갔어요.
+다만 이것도 신뢰할 수 있는 서버 정책은 아니에요.
+메뉴명이 중복되거나 Assistant 응답에 메뉴명이 빠지면 다시 흔들릴 수 있기 때문에, read-only 질문은 어느 정도 허용하되 command Tool은 아래처럼 서버 정책으로 막는 편이 맞다고 생각했어요.
+
+`DELIVERING`처럼 상태 코드를 직접 말하면 나아지는지도 확인했어요.
+이번에는 첫 응답에 `DELIVERING`, 두 번째 응답에 `COOKING`이 그대로 남도록 유도한 뒤, 세 번째 질문에서 `DELIVERING인 주문`을 찾게 했어요.
+
+```text
+1) 2024-1234 배달 상황 알려주세요. 상태 코드는 영어 enum으로도 같이 알려주세요
+   -> 주문 번호 2024-1234의 배달 상태는 DELIVERING입니다.
+2) 2024-1237 주문 메뉴 뭐였죠?
+   -> 현재 주문 상태는 COOKING입니다.
+3) DELIVERING인 주문 라이더 위치 다시 확인해줘
+   -> 주문 번호를 알려주세요.
+```
+
+실제 Memory에도 `DELIVERING`과 `COOKING`이 모두 남아 있었지만, 모델은 `2024-1234`를 선택하지 못했어요.
+
+```json
+[
+  {
+    "type": "ASSISTANT",
+    "content": "주문 번호 2024-1234의 배달 상태는 DELIVERING입니다. 라이더는 역삼역 사거리에 위치하고 있습니다."
+  },
+  {
+    "type": "ASSISTANT",
+    "content": "주문 번호 2024-1237의 주문 메뉴는 불고기버거 2개와 감자튀김 1개입니다. 총 금액은 17,500원이며, 현재 주문 상태는 COOKING입니다."
+  },
+  {
+    "type": "USER",
+    "content": "DELIVERING인 주문 라이더 위치 다시 확인해줘"
+  },
+  {
+    "type": "ASSISTANT",
+    "content": "주문 번호를 알려주세요. DELIVERING 상태의 주문 라이더 위치를 다시 확인하려면 주문 번호가 필요합니다."
+  }
+]
+```
+
+이 결과를 보면 실패 원인은 `DELIVERING`이라는 문자열이 Memory에 없어서만은 아니었어요.
+문자열이 있어도 모델이 자연어 대화 로그를 `status == DELIVERING` 조건으로 안정적으로 검색하지 못했어요.
+즉 상태 기반 참조는 Memory보다 구조화된 상태 저장소나 상태 검색 Tool로 처리하는 편이 낫다고 생각했어요.
+
+이 실패는 프롬프트를 더 세게 쓰는 방식만으로 안정적으로 해결하기 어렵다고 판단했어요.
+ChatMemory는 대화 transcript를 LLM에 다시 넣어 주는 장치이지, 주문 식별의 authoritative state가 아니기 때문이에요.
+운영에서는 `ChatMemory`와 별도로 `ConversationOrderState` 같은 대화 상태를 두고, 주문 참조 상태를 명시적으로 관리하는 편이 안전해요.
+
+```text
+ChatMemory:
+  이전 USER / ASSISTANT 자연어 대화
+
+ConversationOrderState:
+  activeOrderId
+  recentMentionedOrderIds
+  lastExplicitOrderId
+  source = EXPLICIT_USER_MESSAGE | TOOL_RESULT | UI_SELECTION
+```
+
+정책도 보수적으로 두는 것이 맞아요.
+
+| 상황 | 처리 |
+| --- | --- |
+| 사용자가 주문번호를 명시함 | 그 orderId를 사용하고 `activeOrderId` 갱신 |
+| 주문 후보가 1개뿐이고 read-only 조회 | 해당 orderId로 Tool 호출 가능 |
+| 주문 후보가 2개 이상인데 "그거", "그 주문"만 말함 | Tool 호출하지 말고 주문번호를 다시 질문 |
+| `cancelOrder` 같은 상태 변경 Tool | 명시적 orderId 또는 확정된 active order 없으면 호출 금지 |
+| UI에서 주문 카드를 선택함 | 선택된 주문을 `activeOrderId`로 갱신 |
+
+즉 Round 3의 결론은 "ChatMemory로 모든 지시대명사를 해결한다"가 아니라, "ChatMemory는 문맥 보조이고 주문 참조의 최종 책임은 별도 상태 모델과 보수적 Tool 호출 정책에 둔다"는 거예요.
+특히 취소처럼 side effect가 있는 Tool은 애매한 대명사만으로 실행하지 않는 것이 맞아요.
+
+다만 문자열 파싱으로 `그 주문` 같은 표현을 막는 Guard를 두는 방식은 현실적인 해결책으로 보지 않았어요.
+한국어 대명사, 메뉴명, 시간 표현, 취소 의도까지 문자열 규칙으로 늘리기 시작하면 금방 깨지고, 실제로는 LLM이 이해해야 하는 일을 서버 정규식으로 다시 구현하는 꼴이 돼요.
+
+이번 구현에서는 agent를 둘로 나누지 않고, 실제 위험 지점인 Tool 실행 직전에 서버 정책을 걸었어요.
+LLM은 여전히 하나이고, `cancelOrder` Tool 호출을 제안할 수 있어요.
+다만 `GuardedToolCallback`이 실제 `OrderTools.cancelOrder` 실행 전에 `ToolExecutionPolicy`를 먼저 확인해요.
+
+```text
+Assistant LLM
+  -> cancelOrder({"orderId":"2024-1237"}) 제안
+  -> GuardedToolCallback
+  -> ToolExecutionPolicy 검사
+  -> 허용: 실제 OrderTools.cancelOrder 실행
+  -> 차단: CONFIRMATION_REQUIRED Tool 결과 반환
+```
+
+`AssistantService`는 현재 사용자 메시지에서 명시적으로 등장한 주문번호만 추출해서 ToolContext에 넣어요.
+여기서 `OrderIdExtractor`는 `"그 주문"` 같은 자연어를 해석하지 않고, `2024-1234` 형식의 명시 ID만 추출해요.
+이 정도의 포맷 추출은 LLM이 해야 할 자연어 이해를 서버 정규식으로 대체하는 것이 아니라, 서버가 검증 가능한 식별자를 수집하는 단계예요.
+
+```java
+List<String> explicitOrderIds = OrderIdExtractor.extract(message);
+ConversationOrderState orderState =
+        orderStateRepository.rememberExplicitOrderIds(conversationId, explicitOrderIds);
+
+chatClient.prompt()
+        .toolContext(Map.of(
+                "conversationId", conversationId,
+                "explicitOrderIds", explicitOrderIds,
+                "recentOrderIds", orderState.recentOrderIds(),
+                "activeOrderId", orderState.activeOrderId()
+        ));
+```
+
+`ToolExecutionPolicy`는 `cancelOrder`만 보수적으로 막아요.
+현재 요청에 명시된 orderId와 LLM이 제안한 orderId가 일치하면 허용하고, 그렇지 않으면 실제 취소를 실행하지 않아요.
+
+```java
+if (toolName.equals("cancelOrder")) {
+    String proposedOrderId = readOrderId(toolInput);
+
+    if (explicitOrderIds.contains(proposedOrderId)) {
+        return ALLOW;
+    }
+
+    return BLOCK_CONFIRMATION_REQUIRED;
+}
+```
+
+차단 시에는 예외를 던지지 않고 Tool 결과를 반환해요.
+그러면 LLM은 이 Tool 결과를 보고 사용자에게 주문번호 확인을 요청하는 최종 응답을 만들 수 있어요.
+
+```json
+{
+  "outcome": "CONFIRMATION_REQUIRED",
+  "orderId": "2024-1237",
+  "candidates": ["2024-1234", "2024-1237"],
+  "message": "취소할 주문번호를 다시 확인해 주세요."
+}
+```
+
+이 방식의 장점은 LLM 호출 수를 늘리지 않으면서, 취소 같은 상태 변경 Tool의 최종 실행권을 서버가 가진다는 점이에요.
+반대로 read-only Tool인 `getOrderDetail`, `getDeliveryStatus`는 기존처럼 LLM이 호출할 수 있게 두었어요.
+운영에서 더 확장하려면 `confirmedOrderId`를 UI 확인 버튼이나 서버 발급 confirmation token으로 ToolContext에 넣고, 그 값과 일치할 때만 취소를 허용하면 돼요.
+
+이렇게 설계한 근거는 read-only Tool과 command Tool의 실패 비용이 다르기 때문이에요.
+`getDeliveryStatus`나 `getOrderDetail`이 잘못된 주문번호로 호출되면 고객에게 잘못된 안내를 할 수는 있지만, 서버 상태가 바뀌지는 않아요.
+반면 `cancelOrder`가 잘못된 주문번호로 호출되면 실제 주문 상태가 `CANCELED`로 바뀌고, 결제/조리/운영 흐름까지 영향을 줄 수 있어요.
+즉 같은 "그 주문" 해석 실패라도 조회 실패와 취소 실패의 blast radius가 달라요.
+
+| Tool 종류 | 예시 | 잘못된 orderId 추론 시 영향 | 이번 구현의 정책 |
+| --- | --- | --- | --- |
+| read-only query | `getOrderDetail`, `getDeliveryStatus` | 잘못된 안내, 고객 혼란. 서버 상태 변경 없음 | LLM 추론 허용. 필요하면 응답에서 재확인 |
+| command / side effect | `cancelOrder` | 주문 상태 변경, 취소 이력 생성, 결제/운영 영향 | 현재 발화에 명시 orderId가 없으면 실행 직전 차단 |
+
+따라서 이번 정책은 모든 대명사 실패를 없애는 장치가 아니에요.
+예전 실패 시나리오인 `"아까 배달 중이던 그 주문 라이더 위치 다시 확인해줘"`처럼 read-only 질문은 여전히 모델이 되묻거나 잘못 판단할 수 있어요.
+실제로 한 번의 live 검증에서는 `2024-1237`로 잘못 붙었고, 다른 검증에서는 주문번호를 다시 물었어요.
+3단계 JDBC 재검증 중 단순 순서에서는 같은 취지의 질문을 `2024-1234`로 맞춘 적도 있었어요.
+하지만 실패했던 순서와 같은 문장으로 다시 비교하니 JDBC와 InMemory가 모두 같은 방식으로 실패했어요.
+즉 차이는 저장소 때문이 아니라, 직전에 `그 버거 세트`로 `2024-1237` 문맥을 강하게 만든 실험 순서 때문이라고 보는 게 맞아요.
+
+```text
+공통 실험 순서:
+1) 2024-1234 배달 상황 알려주세요
+2) 2024-1237 주문 메뉴 뭐였죠?
+3) 그 버거 세트 지금 어디쯤이에요?
+4) 아까 배달 중이던 그 주문 라이더 위치 다시 확인해줘
+5) 처음에 물어본 그 주문 라이더 위치 다시 확인해줘
+```
+
+| 저장소 | 4턴 기대 | 4턴 실제 | 5턴 기대 | 5턴 실제 |
+| --- | --- | --- | --- | --- |
+| JDBC file | `2024-1234` | `2024-1237` | `2024-1234` | `2024-1237` |
+| InMemory | `2024-1234` | `2024-1237` | `2024-1234` | `2024-1237` |
+
+JDBC와 InMemory 모두 Memory에는 `2024-1234`와 `2024-1237`이 남아 있었지만, 모델은 "배달 중이던", "처음에 물어본"보다 최근의 버거 세트 문맥을 더 강하게 따라갔어요.
+저장소를 JDBC로 바꿔도 상태 조건 참조가 구조적으로 해결되는 것은 아니고, 모델이 자연어 Memory를 그때그때 어떻게 읽는지에 따라 결과가 흔들릴 수 있어요.
+하지만 `"그 주문 취소해주세요"`처럼 command로 이어진 경우에는 모델이 `cancelOrder(2024-1237)`을 제안해도 `ToolExecutionPolicy`가 아래처럼 차단했어요.
+
+```text
+[ToolPolicy] blocked cancelOrder.
+conversationId=customer-1:tool-policy-live,
+proposedOrderId=2024-1237,
+explicitOrderIds=[],
+recentOrderIds=[2024-1237]
+```
+
+반대로 현재 발화에 `2024-1235 취소해주세요`처럼 주문번호가 명시되어 있으면 같은 policy가 허용하고 실제 Tool이 실행돼요.
+
+```text
+[Tool] cancelOrder(orderId=2024-1235, reason=고객 요청)
+[Tool] cancelOrder result(... outcome=CANCELED ...)
+```
+
+결론적으로 이 설계의 목적은 "AI가 항상 올바른 주문을 고르게 만든다"가 아니라, "AI가 틀릴 수 있음을 전제로 상태 변경 Tool의 최종 실행권을 서버가 가진다"는 거예요.
+
+## 1단계 설계 결정
+
+### MAX_MESSAGES = 20
+
+`MessageWindowChatMemory`의 `maxMessages`는 전체 서버가 아니라 conversation id별 메시지 개수예요.
+`USER`와 `ASSISTANT`를 합쳐 20개이므로 일반적인 왕복 기준 약 10턴을 유지해요.
+배달 상담은 주문 상태 확인, 취소 가능 여부, 주문 전환, 재확인까지 보통 3~6턴 안에서 끝난다고 가정하면 10턴은 기준 실험값으로 충분해요.
+다만 위 실험에서도 1턴 `promptTokens=2355`에서 2턴 `promptTokens=2471~2499`처럼 Memory가 붙은 만큼 입력 토큰이 증가했어요.
+따라서 20은 운영 최적값이라기보다 Round 3 기준선이고, 실제 기준은 2단계의 `2 / 20 / Integer.MAX_VALUE` 토큰 비교로 다시 정해야 해요.
+
+### `default` 폴백 위험
+
+| 위험 시나리오 | 영향 | 대응 |
+| --- | --- | --- |
+| 구버전 앱이 `X-Session-Id`를 보내지 않음 | 여러 사용자가 `default` conversation에 섞여 다른 고객의 주문번호가 프롬프트에 들어갈 수 있음 | 운영에서는 헤더 누락 시 400 응답, 또는 서버가 세션 ID 발급 |
+| 어뷰저가 의도적으로 헤더를 제거함 | 공용 `default` 세션을 오염시켜 다른 사용자의 대화 품질과 개인정보를 훼손할 수 있음 | 인증된 사용자 ID와 서버 발급 session id를 함께 검증 |
+| 테스트/운영 클라이언트가 같은 기본값 사용 | 스테이지 환경의 대화가 운영과 다른 재현 불가능한 상태를 만들 수 있음 | 환경별 세션 namespace 분리 |
+
+이번 실습에서는 과제 편의를 위해 `defaultValue = "default"`를 남겼지만, 운영에서는 개발용 폴백으로만 봐야 해요.
+
+### 세션 식별 방식 비교
+
+| 방식 | 장점 | 배달 상담 도메인 단점 |
+| --- | --- | --- |
+| 쿠키 / HTTP Session | 웹 채팅 UI에서는 자동 전송되고 구현이 단순함 | 앱/API 클라이언트에서는 다루기 번거롭고, 멀티 인스턴스에서는 sticky session이나 외부 세션 저장소가 필요 |
+| JWT 클레임 | 인증된 고객 ID와 세션 scope를 함께 검증할 수 있음 | 토큰 만료, 재발급, 세션 회전 정책을 설계해야 함 |
+| URL 경로 | `/session/{id}/chat`처럼 명시적이고 디버깅이 쉬움 | URL 로그에 세션 ID가 남기 쉬워 민감 정보가 될 수 있음 |
+| HTTP 헤더 | 앱/웹/API 모두에서 쓰기 쉽고 프레임워크 의존이 낮음 | 클라이언트가 임의 값을 보낼 수 있으므로 인증 컨텍스트와 결합하지 않으면 위험 |
+
+이번 구현은 HTTP 헤더를 사용하되, `X-Session-Id`만 쓰지 않고 `X-Customer-Id`와 묶어 `customer-1:s1-cust-A` 형태로 conversation id를 만들었어요.
+실제 운영에서는 `X-Customer-Id`도 헤더에서 신뢰하지 말고 JWT나 서버 세션에서 검증된 고객 ID를 읽어야 해요.
+
+### 클라이언트 지정 세션 ID의 보안 리스크
+
+클라이언트가 세션 ID를 직접 정하면 다른 사용자의 세션 ID를 추측하거나, 같은 세션 ID를 재사용해 프롬프트 오염을 만들 수 있어요.
+이를 막으려면 서버가 UUID 기반 session id를 발급하고, 세션 소유자를 인증된 customer id와 함께 저장해야 해요.
+또는 JWT에 서명된 conversation claim을 넣어 위변조를 막고, 세션 조회/삭제 API는 항상 현재 인증 사용자 범위로만 동작해야 해요.
+
+### 취소 의도와 Memory 실험
+
+Round 3에서 가장 중요하게 본 시나리오는 "주문 취소하고 싶어"처럼 의도만 먼저 말하고, 다음 턴에 주문번호만 주는 경우예요.
+같은 세션 `cancel-flow`에서 아래 순서로 실행했어요.
+
+```bash
+curl -X POST "$BASE_URL/api/v1/assistant" \
+  -H 'Content-Type: application/json' \
+  -H 'X-Customer-Id: customer-1' \
+  -H 'X-Session-Id: cancel-flow' \
+  -d '{"message":"주문 취소하고 싶어"}'
+
+curl -X POST "$BASE_URL/api/v1/assistant" \
+  -H 'Content-Type: application/json' \
+  -H 'X-Customer-Id: customer-1' \
+  -H 'X-Session-Id: cancel-flow' \
+  -d '{"message":"2024-1235"}'
+```
+
+1턴 응답은 주문번호를 요구했어요.
+
+```text
+핵심 답변: 주문 취소를 요청하셨습니다. 주문번호가 필요해요.
+필요한 정보: 주문번호를 알려주세요.
+다음 액션: 주문번호를 입력해 주시면 즉시 취소 절차를 진행해 드리겠습니다.
+```
+
+2턴에서는 사용자가 주문번호만 보냈지만, Memory에 남아 있던 취소 의도를 이어받아 `cancelOrder` Tool을 호출했어요.
+
+```text
+[Assistant] sessionId=cancel-flow, conversationId=customer-1:cancel-flow, message=2024-1235
+LLM request prompt. endpoint=assistant, messageCount=4, ...
+[Tool] cancelOrder(orderId=2024-1235, reason=고객 요청)
+[Tool] cancelOrder result(orderId=2024-1235, cancelId=0f6f8235-54d7-4496-91cc-14cf83a1db41, outcome=CANCELED, status=CANCELED, canceledReason=고객 요청, ...)
+LLM call completed. endpoint=assistant, elapsedMs=28274, promptTokens=2575, completionTokens=1727, totalTokens=4302
+```
+
+Memory 상태도 USER/ASSISTANT 2왕복으로 남았어요.
+
+```json
+[
+  {"type":"USER","content":"주문 취소하고 싶어"},
+  {"type":"ASSISTANT","content":"핵심 답변: 주문 취소를 요청하셨습니다. 주문번호가 필요해요.\n\n필요한 정보: 주문번호를 알려주세요.\n\n다음 액션: 주문번호를 입력해 주시면 즉시 취소 절차를 진행해 드리겠습니다."},
+  {"type":"USER","content":"2024-1235"},
+  {"type":"ASSISTANT","content":"핵심 답변: 주문번호 2024-1235의 주문이 성공적으로 취소되었습니다. 취소 사유는 \"고객 요청\"이에요. 추가 도움이 필요하시면 언제든지 연락해 주세요."}
+]
+```
+
+같은 `X-Session-Id: cancel-flow`를 `customer-2`가 사용하면 conversation id가 `customer-2:cancel-flow`로 분리되어 `customer-1`의 취소 의도가 섞이지 않았어요.
+`customer-2`가 주문번호만 보낸 경우에는 Tool을 호출하지 않고 원하는 작업을 다시 물었어요.
+
+```text
+[Assistant] sessionId=cancel-flow, conversationId=customer-2:cancel-flow, message=2024-1235
+LLM request prompt. endpoint=assistant, messageCount=2, ...
+```
+
+응답:
+
+```text
+핵심 답변: 주문번호 2024-1235가 제공되었습니다. 주문 상태, 배달 정보, 취소, 환불 등 어떤 부분을 확인하시고자 하는지 알려주세요.
+```
+
+또 `customer-2`가 명시적으로 `2024-1235 취소해주세요`라고 요청하면 Tool은 실행되지만, `findByIdForCustomer(orderId, customerId)` 소유권 검증 때문에 결과가 `NOT_FOUND`로 막혔어요.
+
+```text
+[Assistant] sessionId=cancel-not-owner, conversationId=customer-2:cancel-not-owner, message=2024-1235 취소해주세요
+[Tool] cancelOrder(orderId=2024-1235, reason=고객 요청)
+[Tool] cancelOrder result(orderId=2024-1235, cancelId=null, outcome=NOT_FOUND, status=null, canceledReason=null, canceledAt=null)
+```
+
+이 실험으로 Memory는 취소 의도와 주문번호를 이어 붙이는 데 도움이 되지만, 실제 command Tool에서는 반드시 현재 고객 소유권과 최신 주문 상태를 다시 확인해야 한다는 점을 확인했어요.
+
+### 재취소 멱등성과 Memory 실험
+
+Round 2에서 만든 취소 멱등성도 Memory와 같이 확인했어요.
+목표는 첫 턴에서 `2024-1239`를 취소한 뒤, 두 번째 턴에서 주문번호 없이 "방금 그거 다시 취소해줘"라고 말했을 때 동작을 보는 것이었어요.
+
+```bash
+curl -X POST "$BASE_URL/api/v1/assistant" \
+  -H 'Content-Type: application/json' \
+  -H 'X-Customer-Id: customer-1' \
+  -H 'X-Session-Id: idempotency-flow' \
+  -d '{"message":"2024-1239 취소해주세요"}'
+
+curl -X POST "$BASE_URL/api/v1/assistant" \
+  -H 'Content-Type: application/json' \
+  -H 'X-Customer-Id: customer-1' \
+  -H 'X-Session-Id: idempotency-flow' \
+  -d '{"message":"방금 그거 다시 취소해줘"}'
+```
+
+1턴 응답:
+
+```text
+주문번호 2024-1239가 성공적으로 취소되었습니다. 취소 사유는 고객 요청이에요.
+```
+
+1턴 Tool 로그:
+
+```text
+[Assistant] sessionId=idempotency-flow, conversationId=customer-1:idempotency-flow, message=2024-1239 취소해주세요
+[Tool] cancelOrder(orderId=2024-1239, reason=고객 요청)
+[Tool] cancelOrder result(orderId=2024-1239, cancelId=4fac69c1-95e8-419a-a9e4-6604f4ea29db, outcome=CANCELED, status=CANCELED, canceledReason=고객 요청, canceledAt=2026-05-31T01:04:03.015453+09:00)
+LLM call completed. endpoint=assistant, elapsedMs=33995, promptTokens=2421, completionTokens=2090, totalTokens=4511
+```
+
+2턴에서는 사용자가 주문번호를 다시 말하지 않았지만, Memory가 1턴의 `2024-1239`를 프롬프트에 넣었고 LLM이 같은 주문으로 `cancelOrder`를 다시 호출했어요.
+다만 도메인 계층은 이미 취소된 주문을 새로 취소하지 않고 `ALREADY_CANCELED`로 응답했고, 첫 취소의 `cancelId`를 그대로 재사용했어요.
+
+```text
+[Assistant] sessionId=idempotency-flow, conversationId=customer-1:idempotency-flow, message=방금 그거 다시 취소해줘
+LLM request prompt. endpoint=assistant, messageCount=4, toolCount=3, messages=USER(chars=16), ASSISTANT(chars=128), SYSTEM(chars=1297), USER(chars=13), tools=getOrderDetail, getDeliveryStatus, cancelOrder
+[Tool] cancelOrder(orderId=2024-1239, reason=고객 요청)
+[Tool] cancelOrder result(orderId=2024-1239, cancelId=4fac69c1-95e8-419a-a9e4-6604f4ea29db, outcome=ALREADY_CANCELED, status=CANCELED, canceledReason=고객 요청, canceledAt=2026-05-31T01:04:03.015453+09:00)
+LLM call completed. endpoint=assistant, elapsedMs=27803, promptTokens=2617, completionTokens=1706, totalTokens=4323
+```
+
+2턴 응답:
+
+```text
+핵심 답변: 주문 2024-1239는 이미 취소되었습니다. 다시 취소할 수 없어요.
+```
+
+Memory 상태:
+
+```json
+[
+  {"type":"USER","content":"2024-1239 취소해주세요"},
+  {"type":"ASSISTANT","content":"주문번호 2024-1239가 성공적으로 취소되었습니다. 취소 사유는 고객 요청이에요. 주문이 취소되었으므로 음식은 제공되지 않습니다.  \n필요한 추가 정보: 없음  \n다음에 취할 액션: 추가 문의사항이 있으면 언제든지 알려주세요."},
+  {"type":"USER","content":"방금 그거 다시 취소해줘"},
+  {"type":"ASSISTANT","content":"핵심 답변: 주문 2024-1239는 이미 취소되었습니다. 다시 취소할 수 없어요. 새로운 주문을 진행하거나 고객센터에 문의해 주세요.  \n필요한 추가 정보: 없음  \n다음에 취할 액션: 새 주문을 생성하거나 고객센터로 연락해 주세요."}
+]
+```
+
+구현상 멱등성은 Memory가 아니라 `OrderCancelService`와 `Order`가 책임져요.
+`OrderCancelService.cancel()`은 `findByIdForCustomer(orderId, customerId)`로 소유권을 먼저 확인하고, 같은 주문 객체에 대해 `synchronized (order)`로 취소 전이를 직렬화해요.
+첫 취소는 `CancelHistoryService.record()`로 이력을 만들고, 반복 취소는 `findLatestCanceled(orderId, customerId)`로 기존 이력을 찾아 같은 `cancelId`, `canceledReason`, `canceledAt`을 돌려줘요.
+
+자동 테스트도 이 경계를 확인해요.
+`OrderToolsTest.cancelOrderReusesFirstCancelHistoryForRepeatedCancel`는 순차 재취소에서 이력이 1개만 남고 같은 `cancelId`를 재사용하는지 검증하고, `cancelOrderCreatesSingleCancelHistoryForConcurrentRepeatedCancel`는 8개 동시 취소 요청에서 `CANCELED` 1개와 `ALREADY_CANCELED` 7개만 나오는지 확인해요.
+즉 Memory는 "방금 그거"를 `2024-1239`로 해석하게 돕지만, 멱등성과 취소 이력의 정합성은 Tool 뒤쪽의 도메인 코드가 보장해요.
+
+정리하면 `CancelHistory`의 한계를 Memory가 완전히 해결한 것은 아니에요.
+두 기능은 서로 다른 문제를 나눠 맡아요.
+`CancelHistory`는 "이 주문이 이미 취소됐는가", "첫 취소 이력은 무엇인가", "반복 요청에서 같은 취소 결과를 돌려줄 수 있는가" 같은 도메인 사실을 보장해요.
+반면 Chat Memory는 "사용자가 말한 방금 그거가 어떤 주문인가", "이전 턴의 취소 의도가 아직 이어지는가" 같은 대화 문맥을 보완해요.
+
+```text
+Chat Memory:
+  "방금 그거 다시 취소해줘" -> 이전 대화에서 2024-1239를 찾음
+
+Tool / Domain:
+  cancelOrder(2024-1239)
+  -> 이미 CANCELED 상태
+  -> 기존 CancelHistory 재사용
+  -> ALREADY_CANCELED 반환
+```
+
+그래서 이번 라운드의 결론은 "Memory가 History를 대체한다"가 아니라, "Memory는 문맥 힌트이고 History는 도메인 사실이다"에 가까워요.
+LLM이 Memory를 보고 주문번호를 잘 추론하더라도, 최종 실행 단계에서는 항상 Tool이 현재 고객 소유권, 최신 주문 상태, 취소 이력을 다시 확인해야 해요.
+
+다만 `X-Session-Id`를 그대로 신뢰하는 방식은 운영용 인증 모델이 아니에요.
+실제 서비스에서는 쿠키, JWT, 인증된 사용자 ID, 서버가 발급한 conversation id 중 하나로 세션을 묶고, 다른 고객이 임의 세션 ID를 추측해 대화 기록을 조회하지 못하게 막아야 해요.
+
+이번 구현에서 Memory는 어디까지나 문맥 힌트예요.
+사용자가 "그 주문 취소해줘"라고 말했을 때 이전 대화의 주문번호를 해석하는 데 도움을 줄 수는 있지만, command Tool을 실행할 때는 여전히 현재 고객 소유 주문인지 확인하고 최신 주문 상태를 Tool로 다시 조회해야 해요.
+즉 "기억은 문맥, 실행은 Tool, 최종 판단은 현재 상태"로 두는 게 맞다고 봤어요.
+
+자동 테스트는 실제 LLM을 호출하지 않고 Memory 경계만 검증했어요.
+모델 응답은 느리고 비결정적이라 단위 테스트에 넣기 어렵기 때문에, `ChatMemoryConfigTest`에서는 20개 윈도우와 Advisor order를 확인하고 `SessionControllerTest`에서는 저장된 메시지 조회, 세션 ID 목록, 삭제 동작을 검증했어요.
+
+## 2단계 검증 - Memory 크기 실험
+
+같은 10턴 시나리오를 `MAX_MESSAGES = 20`, `2`, `Integer.MAX_VALUE`로 각각 실행했어요.
+서버는 매번 새로 띄웠고, 실험 세션도 분리했어요.
+토큰과 시간은 `PerformanceLoggingAdvisor`의 `LLM call completed` 로그에서 10턴을 읽어 평균을 냈어요.
+
+```text
+1) 2024-1234 배달 상황 알려주세요
+2) 그거 몇 분 남았어요?
+3) 2024-1235 주문도 있는데 메뉴 뭐였죠?
+4) 아 그 버거 세트
+5) 2024-1234 취소 가능해요?
+6) 그럼 1235는 취소되죠?
+7) 그거 취소해주세요
+8) 아까 1234는 언제 도착해요?
+9) 그 주문 라이더 위치 다시 확인
+10) 요약해 주세요 지금까지 제가 뭘 물어봤는지
+```
+
+### 정량 비교
+
+| 실험 | MAX_MESSAGES | 10턴 평균 입력 토큰 | 10턴 평균 출력 토큰 | 10턴 평균 응답 시간 | 지시/참조 해결 성공 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A | 20 | 2,493.1 | 2,166.4 | 37,618.7ms | 3 / 5 |
+| B | 2 | 2,042.9 | 1,718.8 | 27,501.0ms | 1 / 5 |
+| C | Integer.MAX_VALUE | 2,572.7 | 1,885.4 | 32,189.5ms | 2 / 5 |
+
+이 표에서 가장 중요한 의미는 "토큰이 적다고 좋은 Memory 설정은 아니다"예요.
+`MAX_MESSAGES = 2`는 평균 입력 토큰과 응답 시간이 가장 낮았지만, 실제 상담 품질은 가장 많이 깨졌어요.
+즉 비용과 속도만 보면 2가 좋아 보일 수 있지만, 이전 주문번호를 복원하지 못해 잘못된 Tool 파라미터를 만들었기 때문에 상담 에이전트로는 위험했어요.
+
+반대로 `Integer.MAX_VALUE`는 10턴 평균만 보면 `20`보다 압도적으로 나쁘게 보이지 않았어요.
+이건 10턴 시점의 대화가 아직 20 messages 근처라서, `MAX_MESSAGES = 20`과 `Integer.MAX_VALUE`가 프롬프트에 넣는 Memory 범위가 거의 같았기 때문이에요.
+따라서 이 숫자만 보고 "무제한도 괜찮다"고 판단하면 안 된다고 생각했어요.
+무제한의 문제는 10턴보다 30턴, 50턴, 100턴처럼 장기 상담에서 입력 토큰과 응답 시간이 계속 누적된다는 점이에요.
+
+또 평균 입력 토큰이 매 턴 완전히 단조 증가하지는 않았어요.
+Tool 호출 여부, 모델이 만든 응답 길이, Tool 결과 재호출 여부에 따라 `promptTokens`가 흔들렸어요.
+그래서 이 실험의 해석은 "정확히 몇 토큰이 정답인가"가 아니라, `MAX_MESSAGES`가 작으면 문맥 품질이 깨지고, 너무 크면 장기적으로 비용과 지연이 커진다는 경향을 확인하는 데 있어요.
+
+결론적으로 `20`은 최종 운영값이라기보다, 이번 도메인에서 10턴 정도의 상담을 보존하면서도 무제한 누적을 막는 기준선으로 의미가 있었어요.
+운영에서는 이 값을 고정 상수로 믿기보다 실제 상담 로그의 평균/상위 95% 턴 수, 입력 토큰 예산, 실패율을 같이 보고 조정해야 해요.
+
+지시/참조 해결 성공은 아래 5개 턴만 봤어요.
+
+| 턴 | 기대 |
+| --- | --- |
+| 2 | `그거`를 `2024-1234`로 해석 |
+| 4 | `그 버거 세트`가 모호하거나 잘못된 참조임을 처리 |
+| 7 | `그거 취소`가 직전의 `2024-1235` 취소 의도를 이어받는지 |
+| 8 | `아까 1234`를 `2024-1234`로 해석 |
+| 9 | `그 주문`을 8턴의 `2024-1234`로 해석 |
+
+`MAX_MESSAGES = 20`은 2, 8, 9턴은 맞췄지만 4턴은 `2024-1235`를 다시 설명했고, 7턴은 `cancelOrder(2024-1235)`를 제안했지만 command guard가 실행 직전에 차단했어요.
+따라서 read-only 문맥은 일부 성공했지만 command는 별도 확인이 필요하다고 봤어요.
+
+```text
+7턴 로그:
+[ToolPolicy] blocked cancelOrder.
+conversationId=customer-1:round2-size-20-r2,
+proposedOrderId=2024-1235,
+explicitOrderIds=[],
+recentOrderIds=[2024-1234, 2024-1235]
+```
+
+`MAX_MESSAGES = 2`는 실패가 가장 뚜렷했어요.
+메모리에 직전 USER/ASSISTANT 한 쌍만 남기 때문에, 10턴이 끝난 뒤 Memory는 마지막 요약 요청과 응답만 남았어요.
+
+```json
+[
+  {
+    "type": "USER",
+    "content": "요약해 주세요 지금까지 제가 뭘 물어봤는지"
+  },
+  {
+    "type": "ASSISTANT",
+    "content": "핵심 답변: 지금까지 고객님께서 물어보신 내용은 \"그 주문 라이더 위치 다시 확인\"입니다."
+  }
+]
+```
+
+실패 예시는 6~9턴에서 잘 보였어요.
+사용자는 `1235`, `1234`를 앞의 `2024-1235`, `2024-1234`의 축약처럼 말했지만, 모델은 이전 긴 주문번호를 복원하지 못하고 `1235`, `1234` 그대로 Tool에 넘겼어요.
+
+```text
+6턴: 그럼 1235는 취소되죠?
+[Tool] getOrderDetail(orderId=1235)
+[Tool] getOrderDetail result(null)
+
+8턴: 아까 1234는 언제 도착해요?
+[Tool] getDeliveryStatus(orderId=1234)
+[Tool] getDeliveryStatus result(null)
+```
+
+응답도 실제 주문을 잇지 못했어요.
+
+```text
+주문번호 1235는 시스템에서 찾을 수 없습니다.
+주문번호 1234는 시스템에서 찾을 수 없습니다.
+```
+
+왜 2가 부족한지도 여기서 확인돼요.
+`MessageWindowChatMemory`는 message 단위로 자르기 때문에 `maxMessages = 2`면 사실상 직전 USER/ASSISTANT 한 쌍만 남아요.
+따라서 1턴의 `2024-1234`, 3턴의 `2024-1235` 같은 기준 정보가 몇 턴 뒤에는 사라지고, 모델은 축약 주문번호를 완성할 근거를 잃어요.
+
+`Integer.MAX_VALUE`는 10턴 기준으로는 `20`과 큰 차이가 나지 않았어요.
+10턴이면 USER/ASSISTANT가 20 messages라서 `MAX_MESSAGES = 20`도 아직 거의 같은 범위를 담을 수 있기 때문이에요.
+다만 로그의 messageCount는 턴이 진행될수록 2, 4, 6, ... 20으로 계속 증가했고, 윈도우 제한이 없으면 11턴부터도 계속 늘어나는 구조예요.
+
+```text
+MAX_VALUE request messageCount:
+1턴=2
+2턴=4
+3턴=6
+4턴=8
+5턴=10
+6턴=12
+7턴=14
+8턴=16
+9턴=18
+10턴=20
+```
+
+이번 실험에서는 발열 때문에 10턴에서 멈췄어요.
+하지만 `MAX_MESSAGES = 20`은 10턴 시점에 이미 20 messages에 도달하므로 다음 턴부터 오래된 일반 메시지가 잘려요.
+반면 `Integer.MAX_VALUE`는 11턴, 12턴, 30턴까지도 계속 누적돼 입력 토큰과 응답 시간이 늘어날 수밖에 없어요.
+즉 `MAX_VALUE`의 위험은 10턴 평균보다 장기 상담에서 더 크게 드러나요.
+
+### 설계 판단
+
+| 전략 | 맞는 시나리오 | 장점 | 단점 |
+| --- | --- | --- | --- |
+| Sliding window | 짧은 상담, 최근 주문 상태가 중요한 배달 상담 | 구현이 단순하고 오래된 맥락을 자동 제거 | 오래된 주문 재문의나 장기 상담 요약에는 약함 |
+| Summarization | 긴 상담, 상담원 인계, 다건 문의 요약 | 오래된 대화를 압축해 보존 가능 | 요약이 잘못되면 주문 상태나 취소 이력을 그럴듯하게 왜곡할 수 있음 |
+
+배달 상담에서 지시 대명사 해결은 command Tool 기준으로 더 엄격하게 봐야 해요.
+조회 질문은 일부 실패해도 되묻거나 정정할 수 있지만, 취소는 실제 상태 변경이 일어나요.
+그래서 프로덕션 기준은 read-only 참조 성공률보다 command 안전성을 우선해야 하고, `cancelOrder`는 현재 발화에 명시 주문번호가 없으면 실행 직전에 차단하는 정책을 유지하는 편이 맞다고 생각했어요.
+
+오래된 대화가 의미 있는 경우도 있어요.
+예를 들어 3시간 전 배달 완료 건의 환불 재문의, 어제 취소한 주문의 결제 취소 확인, 상담원 인계 후 같은 고객이 다시 돌아온 경우예요.
+이런 경우를 세션 Memory만으로 해결하려고 하면 세션 길이와 개인정보 보관 리스크가 커져요.
+운영에서는 ChatMemory와 별개로 주문/취소 이력 같은 도메인 저장소를 조회하고, Memory는 "어떤 주문을 말하는지"를 좁히는 힌트로만 쓰는 편이 낫다고 봤어요.
+
+세션이 아니라 고객 단위로 Memory를 영속 유지하면 "어제 문의한 주문", "지난번 취소 건" 같은 UX는 좋아질 수 있어요.
+하지만 고객의 주소, 전화번호, 주문 습관, 결제 관련 발화가 장기간 쌓이므로 개인정보 저장소가 돼요.
+따라서 고객 단위 영속 Memory는 TTL, 마스킹, 접근 제어, 삭제 요청 처리, 감사 로그를 같이 설계해야 해요.
+
+## 3단계 검증 - InMemory vs JdbcChatMemory
+
+3단계에서는 Chat Memory 저장소를 기본 InMemory에서 JDBC로 바꿔 보고, 같은 기능이 유지되는지와 서버 재시작 후 Memory가 살아남는지를 확인했어요.
+중요한 결론은 저장소 전환이 "대화 해석 능력"을 올리는 것이 아니라, "대화 기록을 어디에 얼마나 오래 저장할 것인가"를 바꾸는 결정이라는 점이에요.
+
+### 구현 변경
+
+`build.gradle`에 JDBC Chat Memory starter와 H2 드라이버를 추가했어요.
+
+```groovy
+implementation 'org.springframework.ai:spring-ai-starter-model-chat-memory-repository-jdbc'
+runtimeOnly 'com.h2database:h2'
+```
+
+`ChatMemoryConfig`의 InMemory repository Bean은 `jdbc` 프로필이 아닐 때만 등록되게 했어요.
+그래야 `jdbc` 프로필에서는 Spring AI가 자동 구성한 `JdbcChatMemoryRepository`가 `MessageWindowChatMemory`에 주입돼요.
+
+```java
+@Bean
+@Profile("!jdbc")
+public ChatMemoryRepository chatMemoryRepository() {
+    return new InMemoryChatMemoryRepository();
+}
+```
+
+JDBC starter를 추가하면 기본 프로필에서도 Spring Boot가 H2 DataSource를 자동 구성할 수 있어요.
+이때 JDBC Chat Memory schema initializer가 같이 실행되면 기본 InMemory 실행이 깨질 수 있어서, 기본 `application.yml`에서는 JDBC schema init을 꺼뒀어요.
+`jdbc` 프로필에서만 다시 켜요.
+
+```yaml
+# application.yml
+spring:
+  ai:
+    chat:
+      memory:
+        repository:
+          jdbc:
+            initialize-schema: never
+```
+
+```yaml
+# application-jdbc.yml
+spring:
+  datasource:
+    url: jdbc:h2:mem:baedal;MODE=PostgreSQL;DB_CLOSE_DELAY=-1
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+  ai:
+    chat:
+      memory:
+        repository:
+          jdbc:
+            initialize-schema: embedded
+            platform: postgresql
+```
+
+여기서 `platform: postgresql`을 둔 이유는 Spring AI 1.0.0 JDBC memory jar 안에 H2용 schema 파일이 없고, PostgreSQL schema가 제공되기 때문이에요.
+H2를 `MODE=PostgreSQL`로 실행해서 PostgreSQL schema를 적용했어요.
+
+### JDBC 프로필 실행
+
+```bash
+LOG_DIR=/private/tmp/baedal-round3-jdbc-mem \
+  ./gradlew bootRun \
+  --args='--server.port=18080 --spring.profiles.active=jdbc --baedal.chat-memory.max-messages=20'
+```
+
+실행 로그에서 JDBC profile과 H2 Console이 정상으로 뜨는 것을 확인했어요.
+
+```text
+The following 1 profile is active: "jdbc"
+HikariPool-1 - Added connection conn0: url=jdbc:h2:mem:baedal user=SA
+H2 console available at '/h2-console'. Database available at 'jdbc:h2:mem:baedal'
+```
+
+### JDBC 프로필에서 1단계 시나리오 재검증
+
+JDBC 프로필에서도 1단계 5종 시나리오를 같은 방식으로 다시 돌렸어요.
+저장소만 바뀌었고 `MessageWindowChatMemory`, `MessageChatMemoryAdvisor`, `ChatMemory.CONVERSATION_ID` 연결은 그대로라서 응답 흐름은 InMemory와 같았어요.
+
+| 시나리오 | 기대 | JDBC 결과 |
+| --- | --- | --- |
+| `2024-1234 어디쯤?` -> `그거 언제 도착해요?` | 2턴에서 `2024-1234` 재참조 | `2024-1234` 배달 중 / 역삼역 사거리로 응답 |
+| `2024-1234 취소` -> `그거 말고 2024-1235 취소` | 대상이 `1235`로 전환 | `2024-1234`는 취소 불가, `2024-1235`는 취소 성공 |
+| `2024-1234 배달 상황` -> `아까 물어본 그 주문` | 이전 orderId 추출 | `2024-1234`로 재조회 |
+| 세션 A에서 `2024-1234`, 세션 B에서 `그 주문` | B에는 맥락 없음 | B는 주문번호를 다시 물음 |
+| Memory 삭제 후 `그거` | 맥락 소실 | 주문번호를 다시 물음 |
+
+삭제 시나리오의 JDBC Memory 상태도 확인했어요.
+
+```json
+// 삭제 전
+[
+  {"type":"USER","content":"2024-1234 배달 어디쯤이에요?"},
+  {"type":"ASSISTANT","content":"2024-1234번 주문의 배달 상태는 '배달 중입니다'입니다. 라이더는 현재 역삼역 사거리에 있습니다. 추가 정보가 필요하시면 알려주세요."}
+]
+
+// DELETE /api/v1/session/j5 이후
+[]
+```
+
+삭제 후 같은 세션에서 `그거 언제 도착해요?`를 보내면 아래처럼 주문번호를 다시 물었어요.
+
+```text
+핵심 답변: 주문 번호가 필요해요. 배달 상태를 확인하기 위해 주문 번호를 알려주세요.
+```
+
+### H2 Console 테이블 확인
+
+H2 Console에 접속해서 아래 쿼리를 실행했어요.
+
+```sql
+SELECT conversation_id, type, LEFT(content, 80) AS content_preview, "timestamp"
+FROM SPRING_AI_CHAT_MEMORY
+ORDER BY "timestamp";
+```
+
+실제 테이블에는 conversation id별 USER/ASSISTANT 메시지가 저장됐어요.
+이번 실행에서는 `MessageChatMemoryAdvisor`가 저장한 USER/ASSISTANT rows만 보였고, Tool 요청/응답은 Chat Memory 테이블에 남지 않았어요.
+
+```text
+CONVERSATION_ID | TYPE      | CONTENT_PREVIEW                         | timestamp
+customer-1:j1   | USER      | 2024-1234 어디쯤 있어요?                 | 2026-05-31 11:51:52.278
+customer-1:j1   | ASSISTANT | 주문번호 2024-1234의 배달 상태는 현재... | 2026-05-31 11:51:52.279
+customer-1:j1   | USER      | 그거 언제 도착해요?                      | 2026-05-31 11:51:52.280
+customer-1:j1   | ASSISTANT | 주문번호 2024-1234는 현재 '배달 중'...   | 2026-05-31 11:51:52.281
+customer-1:j2   | USER      | 2024-1234 취소해주세요                   | 2026-05-31 11:53:26.834
+customer-1:j2   | ASSISTANT | 핵심 답변: 주문 번호 2024-1234는...      | 2026-05-31 11:53:26.835
+customer-1:j2   | USER      | 아, 그거 말고 2024-1235 취소해주세요     | 2026-05-31 11:53:26.836
+customer-1:j2   | ASSISTANT | 핵심 답변: 주문 번호 2024-1235가...      | 2026-05-31 11:53:26.837
+...
+(18 rows)
+```
+
+이 결과로 JDBC 저장소가 실제 DB 테이블에 conversation id, message type, content, timestamp를 남긴다는 것을 확인했어요.
+다만 Tool 결과 JSON 전체가 Memory에 쌓이지 않는다는 점도 같이 확인했어요.
+이건 토큰 비용 관점에서는 유리하지만, 나중에 `"DELIVERING인 주문"`처럼 Tool 결과의 구조화된 값을 검색하고 싶을 때는 Chat Memory만으로 부족하다는 뜻이에요.
+
+### 재시작 실험
+
+같은 세션에서 먼저 `2024-1234 배달 상황 알려주세요`를 보낸 뒤 서버를 내리고 다시 띄웠어요.
+재시작 후 같은 세션에 `그거 언제 도착해요?`를 보냈을 때, `2024-1234`를 기억하는지 확인했어요.
+
+| 저장소 설정 | 재시작 후 Memory 유지? | 관찰 |
+| --- | --- | --- |
+| InMemory 기본 | 아니요 | 재시작 후 `그거`에 대해 주문번호를 다시 물었어요 |
+| `jdbc:h2:mem:baedal` | 아니요 | JDBC여도 H2 mem은 JVM 재시작 후 사라져서 주문번호를 다시 물었어요 |
+| `jdbc:h2:file:/private/tmp/baedal-round3-h2/baedal-stage3-file2` | 예 | 재시작 후 `그거`를 `2024-1234`로 해석해 배달 중 / 역삼역 사거리로 응답했어요 |
+
+`jdbc:h2:mem` 재시작 후 응답:
+
+```text
+핵심 답변: 주문번호가 필요합니다. 주문번호를 알려주시면 배달 상태를 확인해 드리겠습니다.
+```
+
+`jdbc:h2:file` 재시작 후 응답:
+
+```text
+핵심 답변: 주문 번호 2024-1234는 현재 배달 중입니다.
+라이더가 역삼역 사거리에 위치해 있으며, 정확한 도착 시간은 라이더의 현재 진행 상황에 따라 달라집니다.
+```
+
+파일 기반 H2 실험에서는 첫 실행 때 schema 생성을 명시적으로 켰어요.
+`initialize-schema=embedded`만으로는 file URL에서 테이블이 만들어지지 않아 `SPRING_AI_CHAT_MEMORY not found`가 발생했기 때문이에요.
+
+```bash
+# 첫 실행: schema 생성
+LOG_DIR=/private/tmp/baedal-round3-jdbc-file \
+  ./gradlew bootRun \
+  --args='--server.port=18080 --spring.profiles.active=jdbc \
+  --spring.datasource.url=jdbc:h2:file:/private/tmp/baedal-round3-h2/baedal-stage3-file2;MODE=PostgreSQL \
+  --spring.ai.chat.memory.repository.jdbc.initialize-schema=always \
+  --baedal.chat-memory.max-messages=20'
+
+# 재시작: 기존 테이블 사용
+LOG_DIR=/private/tmp/baedal-round3-jdbc-file \
+  ./gradlew bootRun \
+  --args='--server.port=18080 --spring.profiles.active=jdbc \
+  --spring.datasource.url=jdbc:h2:file:/private/tmp/baedal-round3-h2/baedal-stage3-file2;MODE=PostgreSQL \
+  --spring.ai.chat.memory.repository.jdbc.initialize-schema=never \
+  --baedal.chat-memory.max-messages=20'
+```
+
+### 이전 실패 시나리오는 JDBC로 해결되는가
+
+JDBC가 상태 조건 참조를 해결하는지 보려고, InMemory에서 실패했던 순서를 JDBC와 InMemory에서 똑같이 다시 실행했어요.
+
+```text
+1) 2024-1234 배달 상황 알려주세요
+2) 2024-1237 주문 메뉴 뭐였죠?
+3) 그 버거 세트 지금 어디쯤이에요?
+4) 아까 배달 중이던 그 주문 라이더 위치 다시 확인해줘
+5) 처음에 물어본 그 주문 라이더 위치 다시 확인해줘
+```
+
+결과는 둘 다 실패였어요.
+
+| 저장소 | 4턴 기대 | 4턴 실제 | 5턴 기대 | 5턴 실제 |
+| --- | --- | --- | --- | --- |
+| JDBC file | `2024-1234` | `2024-1237` | `2024-1234` | `2024-1237` |
+| InMemory | `2024-1234` | `2024-1237` | `2024-1234` | `2024-1237` |
+
+따라서 JDBC 전환은 상태 조건 참조를 구조적으로 해결하지 못해요.
+JDBC는 Memory 보존성과 멀티 인스턴스 공유 문제를 해결하는 쪽이고, `"배달 중이던 주문"`처럼 과거 Tool 결과를 조건으로 찾는 문제는 별도의 구조화 상태나 검색 Tool이 필요해요.
+
+### 모델을 키우면 해결되는가
+
+여기서 `4B`, `8B`는 모델의 파라미터 수를 뜻해요.
+`qwen3:4b`는 약 40억 개 파라미터, `qwen3:8b`는 약 80억 개 파라미터를 가진 모델이에요.
+파라미터가 많을수록 대화 안의 단서와 조건을 더 잘 조합할 가능성이 있지만, 모델 파일 크기, 메모리 사용량, CPU/GPU 연산량도 같이 늘어요.
+그래서 로컬 실행에서는 정확도만 보지 말고 응답 시간, 발열, 메모리 사용량까지 같이 봐야 해요.
+
+같은 5턴 순서를 `qwen3:8b`로도 다시 실행했어요.
+실행은 아래처럼 모델만 바꿔서 했고, 저장소는 기본 InMemory, `MAX_MESSAGES = 20`으로 유지했어요.
+
+```bash
+LOG_DIR=/private/tmp/baedal-round3-qwen3-8b \
+  ./gradlew bootRun \
+  --args='--server.port=18080 --spring.ai.ollama.chat.model=qwen3:8b --baedal.chat-memory.max-messages=20'
+```
+
+이번 실행에서는 `qwen3:8b`가 `qwen3:4b`보다 상태/순서 단서를 더 잘 따라갔어요.
+
+| 모델 | 의미 | 로컬 모델 크기 | 4턴 `아까 배달 중이던 그 주문` | 5턴 `처음에 물어본 그 주문` | 관찰 |
+| --- | --- | --- | --- | --- | --- |
+| `qwen3:4b` | 약 40억 개 파라미터 | 약 2.5GB | `2024-1237`로 오판 | `2024-1237`로 오판 | 최근 버거 세트 문맥을 더 강하게 따라갔어요 |
+| `qwen3:8b` | 약 80억 개 파라미터 | 약 5.2GB | `2024-1234`로 Tool 호출 | `2024-1234`로 Tool 호출 | 이번 실행에서는 상태/순서 참조를 맞췄어요 |
+
+8B 실행 로그:
+
+```text
+4턴: [Tool] getDeliveryStatus(orderId=2024-1234)
+     elapsedMs=16323, promptTokens=2877, completionTokens=566, totalTokens=3443
+5턴: [Tool] getDeliveryStatus(orderId=2024-1234)
+     elapsedMs=24497, promptTokens=3067, completionTokens=844, totalTokens=3911
+```
+
+그래서 "모델을 키우면 나아질 수는 있다"고 봤어요.
+다만 이건 해결책이라기보다 정확도 개선에 가까워요.
+모델이 좋아져도 `cancelOrder` 같은 command Tool을 바로 실행해도 된다는 뜻은 아니고, 모호한 참조나 위험한 실행은 서버 정책에서 확인/차단해야 해요.
+또 8B는 같은 5턴 실험에서도 마지막 응답이 약 24초 걸려서 4B보다 무거웠어요.
+이번 로컬에서는 발열이 감당 가능했지만, 운영 기준으로는 정확도 개선과 지연 시간/비용을 같이 봐야 해요.
+
+### 의사결정 트리
+
+| 운영 조건 | Yes/No | 선택 |
+| --- | --- | --- |
+| 서비스가 로드밸런서 뒤 멀티 인스턴스로 뜨는가? | Yes | JDBC 같은 외부 공유 저장소가 필요해요 |
+| 서버 재시작 후에도 고객 대화가 이어져야 하는가? | Yes | InMemory는 탈락하고 JDBC/file DB/운영 DB가 필요해요 |
+| 법적/감사 이유로 상담 이력을 N년 보관해야 하는가? | Yes | JDBC만으로도 부족하고 보존 정책, 접근 제어, 감사 로그가 필요해요 |
+| 단일 인스턴스 + 세션이 분 단위로 짧은가? | Yes | InMemory로도 충분할 수 있어요 |
+
+InMemory로 충분한 조건은 아래 3가지라고 봤어요.
+
+- 단일 인스턴스에서만 실행되고 로드밸런서로 요청이 분산되지 않아요.
+- 서버 재시작 시 대화가 사라져도 UX나 운영상 문제가 없어요.
+- 상담 세션이 짧고 세션 수가 제한되어 JVM heap 증가를 관리할 수 있어요.
+
+JDBC가 필요한 조건은 아래 3가지라고 생각했어요.
+
+- 여러 서버 인스턴스가 같은 conversation memory를 공유해야 해요.
+- 배포나 장애 재시작 후에도 고객 대화가 이어져야 해요.
+- 운영팀이 상담 이력을 DB에서 조회하거나 감사/분쟁 대응을 해야 해요.
+
+배달 실제 운영이라면 InMemory보다는 외부 저장소를 우선 검토할 것 같아요.
+상담 이력은 conversation id와 timestamp 기준 조회가 많고, 보존 기간, 백업, 접근 제어 같은 운영 요구사항이 같이 따라오기 때문이에요.
+구체적인 DB 제품은 팀의 기존 운영 환경, 보관 기간, 조회 패턴, 개인정보 처리 정책을 기준으로 선택하는 편이 맞아요.
+
+JDBC 저장소를 도입할 때 같이 봐야 할 비기능 요구사항은 아래예요.
+
+- TTL / 보존 기간: 오래된 상담 Memory를 언제 삭제할지 정해야 해요.
+- 개인정보 마스킹 / 암호화: 주소, 전화번호, 결제 관련 발화가 평문으로 남을 수 있어요.
+- 접근 제어: 상담원 조회와 시스템 쓰기 계정을 분리하고, read-only 뷰를 고려해야 해요.
+- 인덱스 / 파티셔닝: `conversation_id`, `timestamp` 기준 조회가 많으므로 장기 보관 시 테이블 성능을 설계해야 해요.
+- 백업 / 복구: Memory를 운영 데이터로 본다면 장애 복구와 삭제 요청 처리도 같이 설계해야 해요.
 
 ## 학습 기록
 
 ### 내가 배운 것
 
-Round 2에서 가장 크게 체감한 것은 Tool Calling이 "함수 하나 붙이면 모델이 알아서 잘 호출하는 기능"이 아니라, 모델에게 보여주는 API 계약을 설계하는 일이라는 점이에요.
-`getDeliveryStatus`의 description을 일부러 잘못 적었을 때 실제 구현은 그대로인데도 모델이 `getOrderDetail`을 대신 호출했고, 라이더 위치를 알 수 없다고 회피하거나 부분 정보로 추측하는 응답을 만들었어요.
-반대로 메뉴와 배달 위치를 함께 묻는 요청에서는 read-only Tool인 `getOrderDetail`, `getDeliveryStatus`를 한 요청 안에서 둘 다 호출했어요.
-이 실험을 통해 Tool 이름, description, input schema, System Prompt가 합쳐져 모델의 실행 계획이 되고, description은 개발자용 주석이 아니라 모델이 읽는 런타임 API 문서라는 것을 확인했어요.
+처음에는 Chat Memory를 붙이면 `"그거"`, `"아까 그 주문"` 같은 표현이 꽤 자연스럽게 해결될 거라고 생각했어요.
+그런데 curl로 같은 시나리오를 반복해서 돌려 보니, Memory는 정답을 보장하는 저장소가 아니라 이전 대화 문장을 프롬프트 앞에 다시 붙여 주는 장치에 가까웠어요.
+그래서 Memory 안에 `2024-1234`가 남아 있어도 모델이 항상 그 주문을 고르는 것은 아니었고, 최근에 말한 `2024-1237` 문맥을 더 강하게 따라가는 경우가 있었어요.
 
-멱등성은 단순히 `status == CANCELED`를 체크하는 정도로 끝낼 문제가 아니라는 것도 직접 확인했어요.
-`ALREADY_CANCELED` 분기를 제거하자 두 번째 취소 요청이 다시 `CANCELED`로 흘러가면서 `canceledReason`, `canceledAt`이 덮어써지고 새로운 `cancelId`가 생겼어요.
-LLM 자연어 응답만 보면 "이미 취소되었습니다"처럼 멀쩡해 보일 수 있지만, 내부 outcome과 취소 히스토리는 실제로 한 번 더 취소된 것처럼 망가졌어요.
-그래서 취소 같은 command Tool은 주문 최종 상태뿐 아니라 첫 성공 이벤트를 식별할 `cancelId`와 취소 히스토리가 필요하고, 재요청에는 같은 결과를 다시 전달하는 방식이 고객 경험과 운영 로그 양쪽에서 더 안전하다고 판단했어요.
+가장 인상적이었던 실패는 `"아까 배달 중이던 그 주문 라이더 위치 다시 확인해줘"`였어요.
+Memory에는 `2024-1234`가 배달 중이라는 응답이 남아 있었는데도 `qwen3:4b`는 `2024-1237`을 다시 조회했어요.
+저장소를 JDBC로 바꿔도 같은 순서에서는 실패했기 때문에, 이 문제는 InMemory/JDBC의 차이가 아니라 모델이 자연어 대화 로그를 조건 검색처럼 안정적으로 읽지 못하는 문제라고 봤어요.
+반대로 `qwen3:8b`로 바꾸니 이번 실행에서는 `2024-1234`를 맞췄는데, 이것도 "모델을 키우면 나아질 수 있다"는 의미이지 운영에서 안전장치를 없애도 된다는 의미는 아니라고 생각했어요.
 
-판단과 실행을 분리하는 것도 중요했어요.
-고객이 취소 가능 여부만 물을 때는 취소 Tool을 실행하면 안 되고, "취소해주세요"처럼 실행 의도가 명확할 때만 `cancelOrder`가 호출되어야 해요.
-또 이미 취소/환불된 주문을 되돌려 음식 제공을 요구하는 악용 시나리오에서는 상태 변경 Tool이 아니라 조회 Tool로 현재 상태를 확인하고, 새 주문이나 상담원 확인으로 안내해야 했어요.
-여기에 주문번호만으로 조회하면 다른 사람 주문을 볼 수 있는 문제도 있어서, Tool 내부에서 현재 고객 소유 주문인지 확인하도록 막았어요.
-즉 AI Agent에서도 "모델이 잘 말하는가"보다 "어떤 Tool을 어떤 권한과 상태에서 실행해도 되는가"가 더 중요한 경계라고 느꼈어요.
+`MAX_MESSAGES = 2` 실험도 생각보다 의미가 있었어요.
+단순히 메시지를 적게 넣으면 조금 덜 똑똑해지는 정도가 아니라, `1235`, `1234`처럼 사용자가 축약해서 말한 주문번호를 원래의 `2024-1235`, `2024-1234`로 복원하지 못했어요.
+2개면 직전 USER/ASSISTANT 한 쌍만 남기 때문에, 조금만 앞에서 말한 기준 정보가 바로 사라진다는 것을 확인했어요.
+그래서 `MAX_MESSAGES = 20`은 정답이라기보다 이번 과제의 10턴 시나리오를 온전히 관찰하기 위한 기준선이라고 봤어요.
 
-마지막으로 Observability를 붙여 보니 Tool Calling의 비용 구조가 눈에 보였어요.
-`/api/v1/assistant`는 Tool을 실제로 호출하지 않는 인사 요청에서도 Tool 3개의 schema 때문에 `/api/v1/chat`보다 입력 토큰이 늘었고, 배달 위치 조회처럼 Tool이 호출되는 경우에는 Tool call 이후 `ToolResponseMessage`가 붙은 2차 LLM 호출까지 발생했어요.
-정확한 상태를 가져오는 대신 프롬프트가 커지고 왕복이 늘어나므로, Tool을 많이 붙일수록 기능뿐 아니라 토큰 비용, 응답 시간, 로그 민감도까지 같이 설계해야 한다는 점을 배웠어요.
+세션 분리도 단순 기능이 아니라 보안 경계에 가깝다고 느꼈어요.
+처음에는 `X-Session-Id`만으로 conversation id를 나누면 된다고 생각했지만, 사용자가 임의로 같은 세션 ID를 보내면 다른 사람의 Memory와 섞일 수 있어요.
+그래서 `X-Customer-Id`와 `X-Session-Id`를 묶어서 `customerId:sessionId` 형태로 만들었고, 운영에서는 이 고객 ID도 헤더가 아니라 인증 컨텍스트에서 가져와야 한다고 정리했어요.
+
+취소 같은 command Tool은 특히 Memory만 믿으면 안 된다고 봤어요.
+조회 질문에서 orderId를 한 번 잘못 고르는 것도 문제지만, `cancelOrder`에서 잘못 고르면 실제 상태 변경이 일어나요.
+그래서 이번에는 모델이 Tool 호출을 제안하더라도 `ToolExecutionPolicy`가 실행 직전에 명시 주문번호와 확인 여부를 보고 막는 구조를 넣었어요.
+오늘 실험을 해보면서 Chat Memory는 상담 UX를 돕는 장치이고, 실행 안전성은 서버 정책으로 잡아야 한다는 쪽으로 생각이 바뀌었어요.
 
 ### 의문점
 
-아직 궁금한 점은 여러 Tool이 한 번에 호출될 때의 실행 순서와 실패 처리예요.
-이번에는 `getOrderDetail`과 `getDeliveryStatus`처럼 조회 Tool 두 개가 순서대로 호출되어도 문제가 없었지만, 상태를 바꾸는 Tool이 여러 개 섞이면 순서가 비즈니스 결과를 바꿀 수 있어요.
-예를 들어 주문 취소와 포인트 환급, 라이더 배정 해제, 사장님 알림이 각각 Tool로 나뉜다면 LLM이 정한 순서대로 실행해도 되는지, 하나가 실패했을 때 트랜잭션처럼 롤백해야 하는지, 아니면 command Tool은 애초에 하나의 유스케이스로 묶어야 하는지 더 확인해 보고 싶어요.
+아직 제일 궁금한 것은 `"배달 중이던 주문"` 같은 표현을 어디까지 LLM에게 맡기고, 어디부터 서버가 구조화해서 처리해야 하는가예요.
+오늘 실험에서는 메뉴명처럼 `"감자튀김"`이라는 구체적인 단서가 있을 때는 비교적 잘 찾았지만, `"배달 중"` 같은 상태 조건은 4B에서 흔들렸어요.
+그렇다면 Tool 결과에서 `orderId`, `status`, `menu`, `lastMentionedAt` 정도만 별도 상태로 쌓아 두고, LLM은 조건을 추출하고 서버가 후보를 찾는 방식이 더 현실적인지 궁금해졌어요.
 
-Tool 호출 테스트를 어디까지 자동화할 수 있는지도 의문이에요.
-description C 실험처럼 같은 질문에서도 모델이 어떤 Tool을 고르는지가 흔들릴 수 있어서, 일반 단위 테스트처럼 항상 같은 결과를 기대하기 어렵다고 느꼈어요.
-운영에서는 대표 질문별 Tool 선택률을 contract test나 smoke test로 관리해야 할 것 같은데, 어느 정도 실패율을 허용해야 하는지, 모델 변경이나 description 변경을 어떻게 감지해야 하는지는 아직 명확하지 않아요.
+Tool 응답을 Memory에 남길지 말지도 고민돼요.
+현재는 USER/ASSISTANT 중심으로 남아서 토큰 비용은 덜하지만, Tool 응답의 구조화된 값은 다음 턴에서 직접 검색하기 어려웠어요.
+그렇다고 Tool JSON 전체를 Memory에 넣으면 토큰도 늘고 주소나 결제 관련 정보가 섞일 위험도 커져요.
+어떤 값은 Memory가 아니라 별도 session state에 남기는 편이 맞아 보이는데, 그 경계를 어떻게 잡을지는 더 실험해 봐야 해요.
 
-보안과 관찰성 사이의 균형도 남은 질문이에요.
-이번에는 학습 목적으로 System Prompt, 사용자 입력, Tool schema, ToolResponseMessage를 모두 로그로 찍었지만 운영에서는 개인정보와 내부 정책이 그대로 노출될 수 있어요.
-어떤 필드는 마스킹해야 하고, 어떤 로그는 샘플링해야 하며, 장애 분석에 필요한 최소 정보가 무엇인지 더 설계가 필요해요.
-특히 현재 mock에서는 `X-Customer-Id`로 고객을 흉내 냈지만, 실제 서비스에서는 인증 컨텍스트와 세션, 주문 소유권 검증을 어디서 강제할지도 더 다뤄야 해요.
+동시 요청 문제도 더 봐야 할 것 같아요.
+`MessageWindowChatMemory.add()` 구현을 보니 같은 conversation id에 대해 read-modify-write가 한 번에 원자적으로 보장되는 구조는 아니었고, race probe에서도 메시지 유실 가능성을 확인했어요.
+실제 앱에서 사용자가 버튼을 두 번 누르거나 네트워크 재시도로 같은 세션에 요청이 겹치면, Memory가 사용자가 실제로 본 대화와 달라질 수 있어요.
+이걸 세션별 큐로 직렬화할지, in-flight 요청을 막을지, DB optimistic locking으로 해결할지 아직 판단이 필요해요.
 
-### Round 3에 시도하고 싶은 것
+### Round 4에 시도하고 싶은 것
 
-Round 3의 Chat Memory에서는 최근 대화의 주문번호와 마지막 Tool 결과를 안전하게 기억하는 실험을 해보고 싶어요.
-예를 들어 사용자가 먼저 "주문번호 2024-1234 배달 어디쯤이에요?"라고 물은 뒤 "그거 취소해주세요"라고 말하면, Memory에 최근 `orderId=2024-1234`와 마지막 intent가 남아 있어야 지시 대명사 "그거"를 해석할 수 있을 것 같아요.
-다만 Memory 값만 믿고 바로 취소를 실행하면 위험하므로, command Tool을 실행하기 전에는 기억한 주문번호를 다시 확인하거나 "2024-1234 주문을 취소할까요?" 같은 확인 단계를 넣는 방식이 필요해 보여요.
+Round 4에서는 Memory와 RAG를 한 프롬프트에 같이 붙이는 것보다, 둘의 책임을 먼저 분리해서 보고 싶어요.
+Memory는 `"그 주문"`, `"아까 취소하려던 주문"`처럼 지금 세션 안에서만 의미가 있는 말을 풀기 위한 장치로 보고, RAG는 `"비 오는 날 지연 보상"`, `"취소 가능 시간"`, `"환불 기준"`처럼 정책 문서가 필요한 질문을 처리하는 장치로 보고 싶어요.
 
-Memory에는 전체 주문 상세나 개인정보를 넣기보다, 대화 해결에 필요한 최소 context만 넣고 싶어요.
-예를 들면 `recentOrderId`, `lastOrderStatus`, `lastToolOutcome`, `lastCancelId`, `pendingAction` 정도를 세션 단위로 저장하고, 주소나 결제 정보, 상세 취소 사유 같은 민감한 값은 Tool이 필요할 때 다시 조회하는 편이 안전해 보여요.
-또 주문 상태는 시간이 지나면 바뀌므로 Memory는 "힌트"로만 쓰고, 실제 실행이나 최종 답변 전에는 Tool로 최신 상태를 재조회하는 구조를 시도해 보고 싶어요.
+예를 들어 `"아까 그 주문, 비 와서 늦으면 보상돼요?"`라는 질문이 들어오면 한 번에 답하게 하기보다 세 부분으로 나누는 흐름을 실험해 보고 싶어요.
+Memory나 session state로 `그 주문`이 어떤 orderId인지 확인하고, Tool로 최신 주문 상태를 다시 조회하고, RAG로 보상 정책을 찾아 최종 답변을 만드는 방식이에요.
+이렇게 나누면 모델이 기억, 최신 상태, 정책 지식을 한 번에 추측하는 부담이 줄어들 것 같아요.
 
-그리고 Round 2에서 만든 `cancelId`와 outcome을 Memory와 연결해 보고 싶어요.
-사용자가 "아까 취소한 거 다시 확인해줘"라고 하면 Memory의 `lastCancelId`로 같은 취소 결과를 설명하고, "한 번 더 취소해주세요"라고 하면 새 취소를 만들지 않고 기존 `ALREADY_CANCELED` 흐름을 자연스럽게 안내할 수 있을 것 같아요.
-결국 Round 3에서는 Memory가 편의성을 높이되, Tool 실행 권한과 최신 상태 검증을 흐리지 않도록 "기억은 문맥, 실행은 Tool, 최종 판단은 현재 상태"라는 구조로 가져가 보고 싶어요.
+또 Advisor 순서도 실제로 비교해 보고 싶어요.
+Memory가 먼저 들어간 뒤 RAG 검색 질의가 만들어지는 경우와, RAG 문서가 먼저 들어가고 Memory가 뒤에 붙는 경우가 답변 품질이나 토큰 수에 어떤 차이를 만드는지 궁금해요.
+이번 Round 3에서 토큰 수가 생각보다 크게 흔들렸기 때문에, Round 4에서는 답변 품질뿐 아니라 입력 토큰과 응답 시간도 같이 기록해 보고 싶어요.

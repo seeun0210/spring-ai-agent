@@ -4,9 +4,14 @@ import com.baedal.support.advisor.PerformanceLoggingAdvisor;
 import com.baedal.support.advisor.PolicyValidationAdvisor;
 import com.baedal.support.order.OrderTools;
 import com.baedal.support.prompt.BaedalPrompt;
+import com.baedal.support.tool.GuardedToolCallbacks;
+import com.baedal.support.tool.ToolExecutionPolicy;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
+import org.springframework.ai.support.ToolCallbacks;
+import org.springframework.ai.tool.ToolCallback;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -48,6 +53,14 @@ public class ChatClientConfig {
     }
 
     @Bean
+    public ToolCallback[] guardedOrderToolCallbacks(
+            OrderTools orderTools,
+            ToolExecutionPolicy toolExecutionPolicy
+    ) {
+        return GuardedToolCallbacks.wrap(toolExecutionPolicy, ToolCallbacks.from(orderTools));
+    }
+
+    @Bean
     public PolicyValidationAdvisor policyValidationAdvisor(
             @Qualifier("policyValidationChatClient") ChatClient policyValidationChatClient,
             ObjectMapper objectMapper
@@ -58,12 +71,13 @@ public class ChatClientConfig {
     @Bean
     public ChatClient supportChatClient(
             PolicyValidationAdvisor policyValidationAdvisor,
-            OrderTools orderTools
+            @Qualifier("guardedOrderToolCallbacks") ToolCallback[] orderToolCallbacks,
+            MessageChatMemoryAdvisor messageChatMemoryAdvisor
     ) {
         return builder.clone()
                 .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
-                .defaultTools(orderTools)
-                .defaultAdvisors(policyValidationAdvisor, supportPerformanceLoggingAdvisor())
+                .defaultToolCallbacks(orderToolCallbacks)
+                .defaultAdvisors(messageChatMemoryAdvisor, policyValidationAdvisor, supportPerformanceLoggingAdvisor())
                 .build();
     }
 
@@ -76,11 +90,14 @@ public class ChatClientConfig {
     }
 
     @Bean
-    public ChatClient syncChatClient(OrderTools orderTools) {
+    public ChatClient syncChatClient(
+            @Qualifier("guardedOrderToolCallbacks") ToolCallback[] orderToolCallbacks,
+            MessageChatMemoryAdvisor messageChatMemoryAdvisor
+    ) {
         return builder.clone()
                 .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
-                .defaultTools(orderTools)
-                .defaultAdvisors(assistantPerformanceLoggingAdvisor())
+                .defaultToolCallbacks(orderToolCallbacks)
+                .defaultAdvisors(messageChatMemoryAdvisor, assistantPerformanceLoggingAdvisor())
                 .build();
     }
 
