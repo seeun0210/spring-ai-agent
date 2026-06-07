@@ -22,31 +22,89 @@ public class AssistantService {
     private final ChatClient syncChatClient;
     private final ConversationIdResolver conversationIdResolver;
     private final ConversationOrderStateRepository orderStateRepository;
+    private final AssistantProperties assistantProperties;
+    private final AssistantOrderReadProperties orderReadProperties;
+    private final OrderReadContextResolver orderReadContextResolver;
 
     public AssistantService(
             @Qualifier("syncChatClient") ChatClient syncChatClient,
             ConversationIdResolver conversationIdResolver,
-            ConversationOrderStateRepository orderStateRepository
+            ConversationOrderStateRepository orderStateRepository,
+            AssistantProperties assistantProperties,
+            AssistantOrderReadProperties orderReadProperties,
+            OrderReadContextResolver orderReadContextResolver
     ) {
         this.syncChatClient = syncChatClient;
         this.conversationIdResolver = conversationIdResolver;
         this.orderStateRepository = orderStateRepository;
+        this.assistantProperties = assistantProperties;
+        this.orderReadProperties = orderReadProperties;
+        this.orderReadContextResolver = orderReadContextResolver;
     }
 
     public String assist(String sessionId, String message) {
+        if (assistantProperties.isScopeGuardEnabled()) {
+            String scopeFallback = AssistantScopeGuard.fallbackIfOutOfScope(message);
+            if (scopeFallback != null) {
+                log.info("[Assistant] out-of-scope message blocked. sessionId={}", sessionId);
+                return scopeFallback;
+            }
+        }
+
         String conversationId = conversationIdResolver.resolve(sessionId);
         log.info("[Assistant] sessionId={}, conversationId={}, message={}", sessionId, conversationId, message);
 
         List<String> explicitOrderIds = OrderIdExtractor.extract(message);
         ConversationOrderState orderState = orderStateRepository.rememberExplicitOrderIds(conversationId, explicitOrderIds);
+        OrderReadResolution orderReadResolution = resolveOrderRead(conversationId, message);
+        if (orderReadProperties.getStrategy() == OrderReadStrategy.ROUTER && orderReadResolution.resolved()) {
+            log.info("[Assistant] order read routed without LLM. conversationId={}", conversationId);
+            return orderReadResolution.directAnswer();
+        }
+
+        String userMessage = augmentOrderRead(message, orderReadResolution);
+        userMessage = augmentReference(userMessage, conversationId);
 
         return syncChatClient
                 .prompt()
                 .advisors(advisors -> advisors.param(ChatMemory.CONVERSATION_ID, conversationId))
                 .toolContext(toolContext(conversationId, explicitOrderIds, orderState))
-                .user(message)
+                .user(userMessage)
                 .call()
                 .content();
+    }
+
+    private OrderReadResolution resolveOrderRead(String conversationId, String message) {
+        if (orderReadProperties.getStrategy() == OrderReadStrategy.PROMPT_ONLY) {
+            return OrderReadResolution.unresolved();
+        }
+        return orderReadContextResolver.resolve(conversationId, message);
+    }
+
+    private String augmentOrderRead(String message, OrderReadResolution resolution) {
+        if (orderReadProperties.getStrategy() != OrderReadStrategy.PREFETCH || !resolution.resolved()) {
+            return message;
+        }
+        return """
+                %s
+
+                %s
+                """.formatted(message, resolution.context());
+    }
+
+    private String augmentReference(String message, String conversationId) {
+        if (message == null || !message.contains("배달 중")) {
+            return message;
+        }
+
+        return orderStateRepository.findSingleOrderIdByStatus(conversationId, "DELIVERING")
+                .map(orderId -> """
+                        %s
+
+                        [서버 확인]
+                        사용자가 말한 "배달 중이던 주문"은 주문번호 %s입니다.
+                        """.formatted(message, orderId))
+                .orElse(message);
     }
 
     private Map<String, Object> toolContext(

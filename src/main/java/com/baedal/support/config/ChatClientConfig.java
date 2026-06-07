@@ -4,15 +4,18 @@ import com.baedal.support.advisor.PerformanceLoggingAdvisor;
 import com.baedal.support.advisor.PolicyValidationAdvisor;
 import com.baedal.support.order.OrderTools;
 import com.baedal.support.prompt.BaedalPrompt;
+import com.baedal.support.rag.RagRetrievalLoggingAdvisor;
 import com.baedal.support.tool.GuardedToolCallbacks;
 import com.baedal.support.tool.ToolExecutionPolicy;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
+import org.springframework.ai.chat.client.advisor.vectorstore.QuestionAnswerAdvisor;
 import org.springframework.ai.support.ToolCallbacks;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -20,6 +23,9 @@ import org.springframework.context.annotation.Configuration;
 @RequiredArgsConstructor
 public class ChatClientConfig {
     private final ChatClient.Builder builder;
+
+    @Value("${baedal.assistant.advisors:memory-rag}")
+    private String assistantAdvisorMode;
 
     @Bean
     public PerformanceLoggingAdvisor supportPerformanceLoggingAdvisor() {
@@ -72,47 +78,84 @@ public class ChatClientConfig {
     public ChatClient supportChatClient(
             PolicyValidationAdvisor policyValidationAdvisor,
             @Qualifier("guardedOrderToolCallbacks") ToolCallback[] orderToolCallbacks,
-            MessageChatMemoryAdvisor messageChatMemoryAdvisor
+            MessageChatMemoryAdvisor messageChatMemoryAdvisor,
+            QuestionAnswerAdvisor questionAnswerAdvisor,
+            RagRetrievalLoggingAdvisor ragRetrievalLoggingAdvisor,
+            @Qualifier("supportPerformanceLoggingAdvisor") PerformanceLoggingAdvisor performanceLoggingAdvisor
     ) {
         return builder.clone()
                 .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
                 .defaultToolCallbacks(orderToolCallbacks)
-                .defaultAdvisors(messageChatMemoryAdvisor, policyValidationAdvisor, supportPerformanceLoggingAdvisor())
+                .defaultAdvisors(
+                        messageChatMemoryAdvisor,
+                        questionAnswerAdvisor,
+                        ragRetrievalLoggingAdvisor,
+                        policyValidationAdvisor,
+                        performanceLoggingAdvisor
+                )
                 .build();
     }
 
     @Bean
-    public ChatClient chatClient() {
+    public ChatClient chatClient(
+            @Qualifier("chatPerformanceLoggingAdvisor") PerformanceLoggingAdvisor performanceLoggingAdvisor
+    ) {
         return builder.clone()
                 .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
-                .defaultAdvisors(chatPerformanceLoggingAdvisor())
+                .defaultAdvisors(performanceLoggingAdvisor)
                 .build();
     }
 
     @Bean
     public ChatClient syncChatClient(
             @Qualifier("guardedOrderToolCallbacks") ToolCallback[] orderToolCallbacks,
-            MessageChatMemoryAdvisor messageChatMemoryAdvisor
+            MessageChatMemoryAdvisor messageChatMemoryAdvisor,
+            QuestionAnswerAdvisor questionAnswerAdvisor,
+            RagRetrievalLoggingAdvisor ragRetrievalLoggingAdvisor,
+            @Qualifier("assistantPerformanceLoggingAdvisor") PerformanceLoggingAdvisor performanceLoggingAdvisor
+    ) {
+        ChatClient.Builder assistantBuilder = builder.clone()
+                .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
+                .defaultToolCallbacks(orderToolCallbacks);
+
+        if ("performance-only".equalsIgnoreCase(assistantAdvisorMode)) {
+            return assistantBuilder
+                    .defaultAdvisors(performanceLoggingAdvisor)
+                    .build();
+        }
+
+        if ("memory-only".equalsIgnoreCase(assistantAdvisorMode)) {
+            return assistantBuilder
+                    .defaultAdvisors(messageChatMemoryAdvisor, performanceLoggingAdvisor)
+                    .build();
+        }
+
+        return assistantBuilder
+                .defaultAdvisors(
+                        messageChatMemoryAdvisor,
+                        questionAnswerAdvisor,
+                        ragRetrievalLoggingAdvisor,
+                        performanceLoggingAdvisor
+                )
+                .build();
+    }
+
+    @Bean
+    public ChatClient streamingChatClient(
+            @Qualifier("streamPerformanceLoggingAdvisor") PerformanceLoggingAdvisor performanceLoggingAdvisor
     ) {
         return builder.clone()
                 .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
-                .defaultToolCallbacks(orderToolCallbacks)
-                .defaultAdvisors(messageChatMemoryAdvisor, assistantPerformanceLoggingAdvisor())
+                .defaultAdvisors(performanceLoggingAdvisor)
                 .build();
     }
 
     @Bean
-    public ChatClient streamingChatClient() {
+    public ChatClient promptLabChatClient(
+            @Qualifier("promptLabPerformanceLoggingAdvisor") PerformanceLoggingAdvisor performanceLoggingAdvisor
+    ) {
         return builder.clone()
-                .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
-                .defaultAdvisors(streamPerformanceLoggingAdvisor())
-                .build();
-    }
-
-    @Bean
-    public ChatClient promptLabChatClient() {
-        return builder.clone()
-                .defaultAdvisors(promptLabPerformanceLoggingAdvisor())
+                .defaultAdvisors(performanceLoggingAdvisor)
                 .build();
     }
 }

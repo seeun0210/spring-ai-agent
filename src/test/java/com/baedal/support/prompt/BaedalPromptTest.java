@@ -24,4 +24,14 @@ class BaedalPromptTest {
                 .contains("쿠폰")
                 .contains("타 배달 플랫폼");
     }
+
+    @Test
+    void systemPromptContainsRagPolicyCitationAndFallbackRules() {
+        assertThat(BaedalPrompt.SYSTEM_PROMPT)
+                .contains("[정책 인용 규칙]")
+                .contains("Context")
+                .contains("해당 내용은 확인이 필요합니다. 상담원 연결로 도와드리겠습니다.")
+                .contains("정책 수치와 조건은 원문 표현을 유지")
+                .contains("Tool 결과를 주문별 사실로");
+    }
 }

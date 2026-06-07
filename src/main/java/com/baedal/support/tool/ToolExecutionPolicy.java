@@ -21,6 +21,7 @@ public class ToolExecutionPolicy {
     public static final String CONFIRMED_ORDER_ID = "confirmedOrderId";
 
     private static final String CANCEL_ORDER = "cancelOrder";
+    private static final List<String> READ_ONLY_ORDER_TOOLS = List.of("getOrderDetail", "getDeliveryStatus");
 
     private final ConversationOrderStateRepository stateRepository;
     private final ObjectMapper objectMapper;
@@ -60,6 +61,27 @@ public class ToolExecutionPolicy {
         );
         stateRepository.markPendingCancel(conversationId, orderId);
         return ToolPolicyDecision.block(blockedResult(orderId, valueAsStringList(context.get(RECENT_ORDER_IDS))));
+    }
+
+    public void recordResult(String toolName, String toolResultJson, ToolContext toolContext) {
+        if (!READ_ONLY_ORDER_TOOLS.contains(toolName) || toolResultJson == null || toolResultJson.isBlank()) {
+            return;
+        }
+
+        Map<String, Object> context = toolContext == null ? Map.of() : toolContext.getContext();
+        String conversationId = valueAsString(context.get(CONVERSATION_ID));
+        if (conversationId == null) {
+            return;
+        }
+
+        try {
+            JsonNode root = objectMapper.readTree(toolResultJson);
+            String orderId = text(root.get("orderId"));
+            String status = text(root.get("status"));
+            stateRepository.rememberObservedOrderStatus(conversationId, orderId, status);
+        } catch (JsonProcessingException ignored) {
+            log.debug("[ToolPolicy] skipped recording malformed tool result. toolName={}", toolName);
+        }
     }
 
     private String readOrderId(String toolInput) {
@@ -106,6 +128,13 @@ public class ToolExecutionPolicy {
             return string;
         }
         return null;
+    }
+
+    private String text(JsonNode node) {
+        if (node == null || node.asText().isBlank()) {
+            return null;
+        }
+        return node.asText().trim();
     }
 
     private record BlockedCancelResult(
