@@ -1,6 +1,11 @@
 spring:
   application:
     name: baedal-support-agent
+  datasource:
+    url: jdbc:postgresql://localhost:15432/baedal
+    username: baedal
+    password: baedal
+    driver-class-name: org.postgresql.Driver
   ai:
     ollama:
       base-url: http://localhost:11434
@@ -8,12 +13,38 @@ spring:
         model: qwen3:4b
         options:
           temperature: 0.3
+      embedding:
+        model: qwen3-embedding:0.6b
     chat:
       memory:
         repository:
           jdbc:
             initialize-schema: never
+    vectorstore:
+      pgvector:
+        initialize-schema: true
+        index-type: HNSW
+        distance-type: COSINE_DISTANCE
+        dimensions: 1024
 
 logging:
   level:
     org.springframework.ai: DEBUG
+    com.baedal.support: DEBUG
+
+baedal:
+  rag:
+    top-k: 4
+    similarity-threshold: 0.5
+    advisor-order: 20
+    chunk-size: 800
+    min-chunk-size-chars: 350
+    min-chunk-length-to-embed: 5
+    max-num-chunks: 10000
+    keep-separator: true
+    log-retrieved-content: false
+  assistant:
+    advisors: memory-rag
+    scope-guard-enabled: true
+    order-read:
+      strategy: prefetch

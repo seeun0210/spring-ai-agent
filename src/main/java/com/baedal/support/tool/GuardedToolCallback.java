@@ -37,6 +37,8 @@ public class GuardedToolCallback implements ToolCallback {
         if (!decision.allowed()) {
             return decision.toolResultJson();
         }
-        return delegate.call(toolInput, toolContext);
+        String result = delegate.call(toolInput, toolContext);
+        policy.recordResult(getToolDefinition().name(), result, toolContext);
+        return result;
     }
 }

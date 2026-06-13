@@ -95,6 +95,23 @@ class ToolExecutionPolicyTest {
         assertThat(decision.allowed()).isTrue();
     }
 
+    @Test
+    void recordsObservedOrderStatusFromReadOnlyToolResult() {
+        policy.recordResult(
+                "getDeliveryStatus",
+                "{\"orderId\":\"2024-1234\",\"status\":\"DELIVERING\",\"riderLocation\":\"역삼역 사거리\"}",
+                context(Map.of(ToolExecutionPolicy.CONVERSATION_ID, "customer-1:s1"))
+        );
+        policy.recordResult(
+                "getOrderDetail",
+                "{\"orderId\":\"2024-1235\",\"status\":\"CREATED\",\"items\":[]}",
+                context(Map.of(ToolExecutionPolicy.CONVERSATION_ID, "customer-1:s1"))
+        );
+
+        assertThat(stateRepository.findSingleOrderIdByStatus("customer-1:s1", "DELIVERING"))
+                .contains("2024-1234");
+    }
+
     private ToolContext context(Map<String, Object> values) {
         return new ToolContext(values);
     }
