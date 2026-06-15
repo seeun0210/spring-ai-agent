@@ -2,6 +2,9 @@ package com.baedal.support.config;
 
 import com.baedal.support.advisor.PerformanceLoggingAdvisor;
 import com.baedal.support.advisor.PolicyValidationAdvisor;
+import com.baedal.support.guardrail.InputGuardrailAdvisor;
+import com.baedal.support.guardrail.LlmInputGuardrailAdvisor;
+import com.baedal.support.guardrail.OutputGuardrailAdvisor;
 import com.baedal.support.order.OrderTools;
 import com.baedal.support.prompt.BaedalPrompt;
 import com.baedal.support.rag.RagRetrievalLoggingAdvisor;
@@ -76,6 +79,9 @@ public class ChatClientConfig {
 
     @Bean
     public ChatClient supportChatClient(
+            InputGuardrailAdvisor inputGuardrailAdvisor,
+            LlmInputGuardrailAdvisor llmInputGuardrailAdvisor,
+            OutputGuardrailAdvisor outputGuardrailAdvisor,
             PolicyValidationAdvisor policyValidationAdvisor,
             @Qualifier("guardedOrderToolCallbacks") ToolCallback[] orderToolCallbacks,
             MessageChatMemoryAdvisor messageChatMemoryAdvisor,
@@ -87,10 +93,13 @@ public class ChatClientConfig {
                 .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
                 .defaultToolCallbacks(orderToolCallbacks)
                 .defaultAdvisors(
+                        inputGuardrailAdvisor,
+                        llmInputGuardrailAdvisor,
                         messageChatMemoryAdvisor,
                         questionAnswerAdvisor,
                         ragRetrievalLoggingAdvisor,
                         policyValidationAdvisor,
+                        outputGuardrailAdvisor,
                         performanceLoggingAdvisor
                 )
                 .build();
@@ -98,16 +107,22 @@ public class ChatClientConfig {
 
     @Bean
     public ChatClient chatClient(
+            InputGuardrailAdvisor inputGuardrailAdvisor,
+            LlmInputGuardrailAdvisor llmInputGuardrailAdvisor,
+            OutputGuardrailAdvisor outputGuardrailAdvisor,
             @Qualifier("chatPerformanceLoggingAdvisor") PerformanceLoggingAdvisor performanceLoggingAdvisor
     ) {
         return builder.clone()
                 .defaultSystem(BaedalPrompt.SYSTEM_PROMPT)
-                .defaultAdvisors(performanceLoggingAdvisor)
+                .defaultAdvisors(inputGuardrailAdvisor, llmInputGuardrailAdvisor, outputGuardrailAdvisor, performanceLoggingAdvisor)
                 .build();
     }
 
     @Bean
     public ChatClient syncChatClient(
+            InputGuardrailAdvisor inputGuardrailAdvisor,
+            LlmInputGuardrailAdvisor llmInputGuardrailAdvisor,
+            OutputGuardrailAdvisor outputGuardrailAdvisor,
             @Qualifier("guardedOrderToolCallbacks") ToolCallback[] orderToolCallbacks,
             MessageChatMemoryAdvisor messageChatMemoryAdvisor,
             QuestionAnswerAdvisor questionAnswerAdvisor,
@@ -120,21 +135,24 @@ public class ChatClientConfig {
 
         if ("performance-only".equalsIgnoreCase(assistantAdvisorMode)) {
             return assistantBuilder
-                    .defaultAdvisors(performanceLoggingAdvisor)
+                    .defaultAdvisors(inputGuardrailAdvisor, llmInputGuardrailAdvisor, outputGuardrailAdvisor, performanceLoggingAdvisor)
                     .build();
         }
 
         if ("memory-only".equalsIgnoreCase(assistantAdvisorMode)) {
             return assistantBuilder
-                    .defaultAdvisors(messageChatMemoryAdvisor, performanceLoggingAdvisor)
+                    .defaultAdvisors(inputGuardrailAdvisor, llmInputGuardrailAdvisor, messageChatMemoryAdvisor, outputGuardrailAdvisor, performanceLoggingAdvisor)
                     .build();
         }
 
         return assistantBuilder
                 .defaultAdvisors(
+                        inputGuardrailAdvisor,
+                        llmInputGuardrailAdvisor,
                         messageChatMemoryAdvisor,
                         questionAnswerAdvisor,
                         ragRetrievalLoggingAdvisor,
+                        outputGuardrailAdvisor,
                         performanceLoggingAdvisor
                 )
                 .build();
