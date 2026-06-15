@@ -1,6 +1,7 @@
 package com.baedal.support.service;
 
 import com.baedal.support.memory.ConversationIdResolver;
+import com.baedal.support.handoff.HandoffDetector;
 import com.baedal.support.tool.ConversationOrderStateRepository;
 import com.baedal.support.tool.ToolExecutionPolicy;
 import org.junit.jupiter.api.Test;
@@ -286,7 +287,8 @@ class AssistantServiceTest {
                 orderStateRepository,
                 new AssistantProperties(),
                 properties,
-                orderReadContextResolver
+                orderReadContextResolver,
+                new HandoffDetector()
         );
     }
 
@@ -315,7 +317,8 @@ class AssistantServiceTest {
                 orderStateRepository,
                 assistantProperties,
                 orderReadProperties,
-                orderReadContextResolver
+                orderReadContextResolver,
+                new HandoffDetector()
         );
     }
 }

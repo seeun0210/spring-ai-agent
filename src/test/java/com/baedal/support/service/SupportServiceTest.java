@@ -2,6 +2,7 @@ package com.baedal.support.service;
 
 import com.baedal.support.dto.SupportResponse;
 import com.baedal.support.guard.SupportRequestGuard;
+import com.baedal.support.handoff.HandoffDetector;
 import com.baedal.support.memory.ConversationIdResolver;
 import com.baedal.support.validator.SupportResponseValidator;
 import org.junit.jupiter.api.Test;
@@ -50,7 +51,13 @@ class SupportServiceTest {
         when(responseSpec.entity(SupportResponse.class)).thenReturn(llmResponse);
         when(responseValidator.validate(llmResponse)).thenReturn(llmResponse);
 
-        SupportService service = new SupportService(chatClient, requestGuard, responseValidator, conversationIdResolver);
+        SupportService service = new SupportService(
+                chatClient,
+                requestGuard,
+                responseValidator,
+                conversationIdResolver,
+                new HandoffDetector()
+        );
 
         SupportResponse response = service.triage("support-session", "배달 상태 확인");
 

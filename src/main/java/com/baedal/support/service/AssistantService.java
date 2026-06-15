@@ -1,5 +1,7 @@
 package com.baedal.support.service;
 
+import com.baedal.support.handoff.HandoffDecision;
+import com.baedal.support.handoff.HandoffDetector;
 import com.baedal.support.memory.ConversationIdResolver;
 import com.baedal.support.tool.ConversationOrderState;
 import com.baedal.support.tool.ConversationOrderStateRepository;
@@ -10,6 +12,7 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -25,6 +28,7 @@ public class AssistantService {
     private final AssistantProperties assistantProperties;
     private final AssistantOrderReadProperties orderReadProperties;
     private final OrderReadContextResolver orderReadContextResolver;
+    private final HandoffDetector handoffDetector;
 
     public AssistantService(
             @Qualifier("syncChatClient") ChatClient syncChatClient,
@@ -32,7 +36,8 @@ public class AssistantService {
             ConversationOrderStateRepository orderStateRepository,
             AssistantProperties assistantProperties,
             AssistantOrderReadProperties orderReadProperties,
-            OrderReadContextResolver orderReadContextResolver
+            OrderReadContextResolver orderReadContextResolver,
+            HandoffDetector handoffDetector
     ) {
         this.syncChatClient = syncChatClient;
         this.conversationIdResolver = conversationIdResolver;
@@ -40,9 +45,27 @@ public class AssistantService {
         this.assistantProperties = assistantProperties;
         this.orderReadProperties = orderReadProperties;
         this.orderReadContextResolver = orderReadContextResolver;
+        this.handoffDetector = handoffDetector;
     }
 
     public String assist(String sessionId, String message) {
+        return handoffDetector.detect(message)
+                .map(HandoffDecision::textMessage)
+                .orElseGet(() -> assistWithFallback(sessionId, message));
+    }
+
+    private String assistWithFallback(String sessionId, String message) {
+        try {
+            return guardedAssist(sessionId, message);
+        } catch (ResponseStatusException ex) {
+            throw ex;
+        } catch (RuntimeException ex) {
+            log.warn("[Assistant] assistant failed. sessionId={}, reason={}", sessionId, ex.getMessage());
+            return HandoffDecision.systemFallback().textMessage();
+        }
+    }
+
+    private String guardedAssist(String sessionId, String message) {
         if (assistantProperties.isScopeGuardEnabled()) {
             String scopeFallback = AssistantScopeGuard.fallbackIfOutOfScope(message);
             if (scopeFallback != null) {

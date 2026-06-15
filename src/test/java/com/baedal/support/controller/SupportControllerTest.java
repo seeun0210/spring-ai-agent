@@ -2,6 +2,7 @@ package com.baedal.support.controller;
 
 import com.baedal.support.dto.SupportResponse;
 import com.baedal.support.guard.SupportRequestGuard;
+import com.baedal.support.handoff.HandoffDetector;
 import com.baedal.support.memory.ConversationIdResolver;
 import com.baedal.support.service.SupportService;
 import com.baedal.support.validator.SupportResponseValidator;
@@ -13,8 +14,10 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.http.MediaType;
 import org.springframework.context.annotation.Import;
+import org.springframework.http.HttpStatus;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
 import java.util.function.Consumer;
@@ -29,7 +32,13 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @WebMvcTest(SupportController.class)
-@Import({SupportService.class, SupportRequestGuard.class, SupportResponseValidator.class, GlobalExceptionHandler.class})
+@Import({
+        SupportService.class,
+        SupportRequestGuard.class,
+        SupportResponseValidator.class,
+        HandoffDetector.class,
+        GlobalExceptionHandler.class
+})
 class SupportControllerTest {
 
     @Autowired
@@ -66,6 +75,21 @@ class SupportControllerTest {
                 .andExpect(jsonPath("$.handoffReason").value("개인정보 제공 요청은 상담원 또는 내부 정책 확인이 필요합니다."));
 
         verify(responseSpec).entity(SupportResponse.class);
+    }
+
+    @Test
+    void triageReturnsHandoffBeforeCallingLlmForExplicitTransferRequest() throws Exception {
+        mockMvc.perform(post("/api/v1/support")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"message\":\"상담원 연결해 주세요\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.category").value("ETC"))
+                .andExpect(jsonPath("$.urgency").value("HIGH"))
+                .andExpect(jsonPath("$.handoffRequired").value(true))
+                .andExpect(jsonPath("$.nextAction").value(org.hamcrest.Matchers.containsString("1600-0987")))
+                .andExpect(jsonPath("$.handoffReason").value(org.hamcrest.Matchers.containsString("상담원 연결 요청")));
+
+        verifyNoInteractions(supportChatClient);
     }
 
     @Test
@@ -192,8 +216,10 @@ class SupportControllerTest {
         mockMvc.perform(post("/api/v1/support")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"message\":\"배달 상태 확인\"}"))
-                .andExpect(status().isInternalServerError())
-                .andExpect(jsonPath("$.code").value("INTERNAL_ERROR"));
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.summary").value(org.hamcrest.Matchers.containsString("상담원")))
+                .andExpect(jsonPath("$.nextAction").value(org.hamcrest.Matchers.containsString("1600-0987")))
+                .andExpect(jsonPath("$.handoffRequired").value(true));
     }
 
     @Test
@@ -203,8 +229,23 @@ class SupportControllerTest {
         mockMvc.perform(post("/api/v1/support")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"message\":\"배달 상태 확인\"}"))
-                .andExpect(status().isInternalServerError())
-                .andExpect(jsonPath("$.code").value("INTERNAL_ERROR"));
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.summary").value(org.hamcrest.Matchers.containsString("상담원")))
+                .andExpect(jsonPath("$.nextAction").value(org.hamcrest.Matchers.containsString("1600-0987")))
+                .andExpect(jsonPath("$.handoffRequired").value(true));
+    }
+
+    @Test
+    void triageKeepsUnauthorizedCustomerScopeErrors() throws Exception {
+        when(conversationIdResolver.resolve(ArgumentMatchers.anyString()))
+                .thenThrow(new ResponseStatusException(HttpStatus.UNAUTHORIZED, "X-Customer-Id 헤더가 필요합니다."));
+
+        mockMvc.perform(post("/api/v1/support")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"message\":\"배달 상태 확인\"}"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value("REQUEST_FAILED"))
+                .andExpect(jsonPath("$.message").value("X-Customer-Id 헤더가 필요합니다."));
     }
 
     private ChatClient.CallResponseSpec mockChatClientResponse(String userMessage, SupportResponse response) {

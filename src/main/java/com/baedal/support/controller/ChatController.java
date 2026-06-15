@@ -1,29 +1,22 @@
 package com.baedal.support.controller;
 
 import com.baedal.support.dto.ChatRequest;
+import com.baedal.support.service.ChatService;
 import jakarta.validation.Valid;
-import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
 @RequestMapping("/api/v1/chat")
 public class ChatController {
 
-    private final ChatClient chatClient;
+    private final ChatService chatService;
 
-    public ChatController(
-            @Qualifier("chatClient") ChatClient chatClient
-    ) {
-        this.chatClient = chatClient;
+    public ChatController(ChatService chatService) {
+        this.chatService = chatService;
     }
 
     @PostMapping
     public String chat(@Valid @RequestBody ChatRequest request) {
-        return chatClient
-                .prompt()
-                .user(request.message())
-                .call()
-                .content();
+        return chatService.chat(request.message());
     }
 }
